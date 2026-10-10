@@ -1,0 +1,76 @@
+{
+    "name": "citomni/mcp",
+    "description": "MCP (Model Context Protocol) server endpoint for CitOmni applications. Exposes tools registered explicitly in config to AI clients over authenticated Streamable HTTP. Built on the official MCP PHP SDK.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "citomni",
+        "citomni-framework",
+        "citomni-php",
+        "mcp",
+        "mcp-server",
+        "model-context-protocol",
+        "streamable-http",
+        "json-rpc",
+        "ai",
+        "llm",
+        "tool-calling",
+        "php",
+        "php8",
+        "provider",
+        "deterministic"
+    ],
+    "homepage": "https://github.com/citomni/mcp",
+    "support": {
+        "email": "lars@grove-mortensen.dk",
+        "issues": "https://github.com/citomni/mcp/issues",
+        "source": "https://github.com/citomni/mcp",
+        "docs": "https://github.com/citomni/mcp/blob/main/README.md",
+        "security": "https://github.com/citomni/.github/blob/main/SECURITY.md"
+    },
+    "require": {
+        "php": "^8.5",
+        "citomni/http": "^1.0.5",
+        "citomni/infrastructure": "^1.0.0.5",
+        "citomni/kernel": "^1.0",
+        "mcp/sdk": "^0.8.1",
+        "nyholm/psr7": "^1.8",
+        "psr/http-factory": "^1.0",
+        "psr/http-message": "^1.1 || ^2.0",
+        "psr/log": "^2.0 || ^3.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "CitOmni\\Mcp\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "CitOmni\\Mcp\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "php-http/discovery": false
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "extra": {
+        "branch-alias": {
+            "dev-main": "1.0.x-dev"
+        }
+    },
+    "scripts": {
+        "test": "@php tests/run.php"
+    },
+    "authors": [
+        {
+            "name": "Lars Grove Mortensen",
+            "email": "lars@grove-mortensen.dk",
+            "homepage": "https://www.citomni.com",
+            "role": "Developer"
+        }
+    ]
+}
