@@ -33,7 +33,11 @@ use Mcp\Server\Handler\ToolHandlerInterface;
  *   2) title, description, annotations, outputSchema, _meta, icons (optional)
  * - The SDK validates the arguments against inputSchema before execute() runs.
  *   A violation never reaches the tool; the client gets JSON-RPC -32602.
- * - Constructed per request as new $class($app); init() runs when defined.
+ * - Constructed per request as new $class($app, $client); init() runs when
+ *   defined. $client is the secret key whose token authenticated the request,
+ *   e.g. "mcp.client_token.1", or null when authentication is disabled. A tool
+ *   uses it to tell callers apart, for example to bind state to the client
+ *   that created it; it is never the token.
  *
  * Notes:
  * - DEFINITION must not contain "name"; ServerFactory refuses one that does.
@@ -69,14 +73,19 @@ abstract class BaseTool implements ToolHandlerInterface {
 	/** Application container (configuration, service map, utilities). */
 	protected App $app;
 
+	/** Secret key that authenticated the request, e.g. "mcp.client_token.1"; null when authentication is disabled. */
+	protected readonly ?string $client;
+
 
 	/**
-	 * Inject the application container and run the optional init() hook.
+	 * Inject the application container and the authenticated client, then run the optional init() hook.
 	 *
 	 * @param App $app Application instance.
+	 * @param string|null $client Secret key that authenticated the request; null when authentication is disabled.
 	 */
-	public function __construct(App $app) {
+	public function __construct(App $app, ?string $client = null) {
 		$this->app = $app;
+		$this->client = $client;
 
 		if (\method_exists($this, 'init')) {
 			$this->init();

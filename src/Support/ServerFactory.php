@@ -44,7 +44,7 @@ use Psr\Log\LoggerInterface;
  *   and completions, which this package does not offer.
  * - Each mcp.tools entry is registered with Builder::add(): the definition from
  *   the class's DEFINITION constant, named by the cfg key, and the handler
- *   constructed as new $class($app). Null entries are skipped.
+ *   constructed as new $class($app, $client). Null entries are skipped.
  * - transport() wraps the request in the SDK's Streamable HTTP transport with
  *   DNS rebinding protection only. The router already answers OPTIONS, and the
  *   SDK's CORS middleware adds nothing a server-to-server client needs.
@@ -58,7 +58,7 @@ use Psr\Log\LoggerInterface;
  * Typical usage:
  *   $factory   = new ServerFactory($this->app);
  *   $transport = $factory->transport($request, $psr17Factory, $logger);
- *   $response  = $factory->server($logger)->run($transport);
+ *   $response  = $factory->server($logger, $client)->run($transport);
  */
 final class ServerFactory {
 
@@ -70,11 +70,12 @@ final class ServerFactory {
 	 * Build the MCP server with every configured tool.
 	 *
 	 * @param LoggerInterface $logger Logger for the SDK.
+	 * @param string|null $client Secret key that authenticated the request, passed to every tool; null when authentication is disabled.
 	 * @return Server Server ready for run().
 	 * @throws McpConfigException When mcp.tools is invalid or a tool definition is rejected.
 	 * @throws \Mcp\Exception\RuntimeException When the session directory cannot be created or written.
 	 */
-	public function server(LoggerInterface $logger): Server {
+	public function server(LoggerInterface $logger, ?string $client = null): Server {
 		$cfg = $this->app->cfg->mcp;
 		$ttlMs = (int)$cfg->cache->ttl_ms;
 
@@ -93,7 +94,7 @@ final class ServerFactory {
 			->setLogger($logger);
 
 		foreach ($this->tools() as $name => $class) {
-			$builder->add($this->definition($name, $class), new $class($this->app));
+			$builder->add($this->definition($name, $class), new $class($this->app, $client));
 		}
 
 		return $builder->build();

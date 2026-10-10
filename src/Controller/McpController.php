@@ -88,7 +88,7 @@ final class McpController extends BaseController {
 		$logger = new SdkLogger($this->app, (string)$mcp->log->file, $sdkLevel === null ? null : (string)$sdkLevel);
 		$factory = new ServerFactory($this->app);
 		$transport = $factory->transport($bridge->request($body), $bridge->factory(), $logger);
-		$response = $factory->server($logger)->run($transport);
+		$response = $factory->server($logger, $auth['client'])->run($transport);
 
 		// -- 3. Log and send ----------------------------------------------
 		$this->logAccess($mcp, $auth['client'], $body, $response, $startNs);

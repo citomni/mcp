@@ -246,7 +246,8 @@ The contract:
 - **Result.** A string becomes one text block. An array or object becomes one text block of pretty-printed JSON and the same data as `structuredContent`. `Mcp\Schema\Content\*` objects and a `CallToolResult` are sent as they are.
 - **Errors the model should see.** Throw `Mcp\Exception\ToolCallException`. The client gets a result with `isError: true` and the message, and the model can react, for example by correcting a path.
 - **Other exceptions.** Any other throwable is a server error. The client gets JSON-RPC -32603 without details, and the SDK logs the exception at `error` in `var/logs/mcp.jsonl`. These failures never reach the global error handler, because the SDK answers the client itself.
-- **Construction.** Every request that builds the server constructs every registered tool as `new $class($app)`, also for `tools/list`. Keep the constructor and an optional `init()` cheap; resolve services in `execute()`.
+- **Construction.** Every request that builds the server constructs every registered tool as `new $class($app, $client)`, also for `tools/list`. Keep the constructor and an optional `init()` cheap; resolve services in `execute()`.
+- **Client.** `$this->client` is the secret key whose token authenticated the request, for example `mcp.client_token.1`, or null when authentication is disabled. Use it to tell clients apart, for example to bind server-side state to the client that created it. It is never the token.
 - **Annotations are hints.** `readOnlyHint` tells the client what the tool does; nothing enforces it. A tool that must not write must not be given the means to.
 
 A tool class that does not extend `BaseTool`, or a `DEFINITION` the SDK rejects, throws `McpConfigException` with the tool's name on every request. The global error handler answers 500 and logs it.

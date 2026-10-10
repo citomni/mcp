@@ -16,6 +16,7 @@ declare(strict_types=1);
 namespace CitOmni\Mcp\Tests;
 
 use CitOmni\Mcp\Tests\Support\CrashingTool;
+use CitOmni\Mcp\Tests\Support\ClientTool;
 use CitOmni\Mcp\Tests\Support\EchoTool;
 use CitOmni\Mcp\Tests\Support\FailingTool;
 use CitOmni\Mcp\Tests\Support\HttpServer;
@@ -293,7 +294,7 @@ $mcpTestApps = [];
 
 $mainCfg = [
 	'server' => ['name' => 'citomni-mcp-test', 'title' => 'CitOmni MCP test', 'version' => '9.9.9', 'instructions' => 'Test server.'],
-	'tools'  => ['echo' => EchoTool::class, 'fail' => FailingTool::class, 'crash' => CrashingTool::class],
+	'tools'  => ['echo' => EchoTool::class, 'fail' => FailingTool::class, 'crash' => CrashingTool::class, 'client' => ClientTool::class],
 	'http'   => ['allowed_hosts' => ['localhost'], 'max_body_bytes' => 65_536],
 	'cache'  => ['ttl_ms' => 12_345],
 	'log'    => ['sdk_level' => 'debug'],
@@ -404,7 +405,7 @@ test('tools/list lists ping from the baseline and the app\'s tools', static func
 	}
 
 	\ksort($tools);
-	check(\array_keys($tools) === ['crash', 'echo', 'fail', 'ping'], 'tools: ' . \implode(', ', \array_keys($tools)) . ' ' . $response['body']);
+	check(\array_keys($tools) === ['client', 'crash', 'echo', 'fail', 'ping'], 'tools: ' . \implode(', ', \array_keys($tools)) . ' ' . $response['body']);
 	check(($tools['ping']['annotations']['readOnlyHint'] ?? null) === true, 'ping annotations: ' . \json_encode($tools['ping']['annotations'] ?? null));
 	check(($tools['ping']['title'] ?? '') === 'Ping', 'ping title: ' . \json_encode($tools['ping']['title'] ?? null));
 	check(($tools['echo']['inputSchema']['required'] ?? null) === ['text'], 'echo inputSchema: ' . \json_encode($tools['echo']['inputSchema'] ?? null));
@@ -498,7 +499,7 @@ test('tools/list answers with the tools and caching hints', static function () u
 	$response = modern($main, 'tools/list');
 	$names = \array_column($response['json']['result']['tools'] ?? [], 'name');
 	\sort($names);
-	check($names === ['crash', 'echo', 'fail', 'ping'], 'tools: ' . $response['body']);
+	check($names === ['client', 'crash', 'echo', 'fail', 'ping'], 'tools: ' . $response['body']);
 	check(($response['json']['result']['ttlMs'] ?? null) === 12_345, 'ttlMs: ' . $response['body']);
 });
 
@@ -506,6 +507,26 @@ test('tools/call ping answers pong without a session', static function () use ($
 	$response = modern($main, 'tools/call', ['name' => 'ping', 'arguments' => new \stdClass()]);
 	$text = $response['json']['result']['content'][0]['text'] ?? '';
 	check(\str_starts_with($text, 'pong '), 'answer: ' . $response['body']);
+});
+
+test('a tool receives the secret key that authenticated the request', static function () use ($main): void {
+	foreach (['mcp.client_token.1' => TOKEN_1, 'mcp.client_token.2' => TOKEN_2] as $key => $token) {
+		$response = rpc($main, [
+			'jsonrpc' => '2.0',
+			'id'      => 1,
+			'method'  => 'tools/call',
+			'params'  => [
+				'name'      => 'client',
+				'arguments' => new \stdClass(),
+				'_meta'     => [
+					'io.modelcontextprotocol/protocolVersion'    => '2026-07-28',
+					'io.modelcontextprotocol/clientCapabilities' => new \stdClass(),
+				],
+			],
+		], ['Authorization' => 'Bearer ' . $token, 'MCP-Protocol-Version' => '2026-07-28', 'Mcp-Method' => 'tools/call', 'Mcp-Name' => 'client']);
+		$text = $response['json']['result']['content'][0]['text'] ?? '';
+		check($text === $key, $key . ' got: ' . $response['body']);
+	}
 });
 
 test('a tool error and a crash are answered as in the handshake era', static function () use ($main): void {
@@ -560,11 +581,26 @@ test('no log contains a token, even at sdk_level debug', static function () use 
 // ----------------------------------------------------------------
 
 test('secret_keys [] disables authentication', static function (): void {
-	$server = serve(writeApp(['mcp' => ['auth' => ['secret_keys' => []]]], null));
+	$server = serve(writeApp(['mcp' => ['auth' => ['secret_keys' => []], 'tools' => ['client' => ClientTool::class]]], null));
 
 	try {
 		$response = rpc($server, initializeMessage(), ['Authorization' => '', 'Host' => 'localhost:' . $server->port]);
 		check($response['status'] === 200, 'status ' . $response['status'] . ': ' . $response['body']);
+
+		$client = rpc($server, [
+			'jsonrpc' => '2.0',
+			'id'      => 2,
+			'method'  => 'tools/call',
+			'params'  => [
+				'name'      => 'client',
+				'arguments' => new \stdClass(),
+				'_meta'     => [
+					'io.modelcontextprotocol/protocolVersion'    => '2026-07-28',
+					'io.modelcontextprotocol/clientCapabilities' => new \stdClass(),
+				],
+			],
+		], ['Authorization' => '', 'Host' => 'localhost:' . $server->port, 'MCP-Protocol-Version' => '2026-07-28', 'Mcp-Method' => 'tools/call', 'Mcp-Name' => 'client']);
+		check(($client['json']['result']['content'][0]['text'] ?? '') === 'none', 'a tool without authentication got: ' . $client['body']);
 	} finally {
 		$server->stop();
 	}

@@ -7,7 +7,7 @@ composer install
 php tests/http/run.php
 ```
 
-Expected: `33 passed, 0 failed`
+Expected: `34 passed, 0 failed`
 
 `PASS` lines go to stdout and `FAIL` lines to stderr. The last line holds the totals, and the exit code is 1 when a case fails.
 
@@ -15,13 +15,13 @@ Expected: `33 passed, 0 failed`
 
 The suite writes small apps below its run directory: `config/providers.php` with the Infrastructure and MCP providers, `config/citomni_http_cfg.php` with the case's `mcp` overrides, `var/secrets/app.secret.dev.php` with two random client tokens, and `public/index.php`, which loads the package's `vendor/autoload.php` and runs `\CitOmni\Http\Kernel::run()` in `dev`. Each app runs in its own `php -S 127.0.0.1:<free port>` with `public/index.php` as router, the same PHP binary and php.ini as the suite. Every request is a fresh PHP request in that process, so only files survive between requests, as under PHP-FPM.
 
-The main app registers three test tools from `tests/Support/` next to the baseline `ping`: `echo` returns its `text` argument, `fail` throws `ToolCallException`, and `crash` throws `RuntimeException`. It sets an absolute `http.base_url`, so the DNS rebinding check has a fixed host, and logs the SDK at `debug`, so the token check covers everything the SDK can log.
+The main app registers four test tools from `tests/Support/` next to the baseline `ping`: `echo` returns its `text` argument, `fail` throws `ToolCallException`, `crash` throws `RuntimeException`, and `client` returns the secret key that authenticated the request. It sets an absolute `http.base_url`, so the DNS rebinding check has a fixed host, and logs the SDK at `debug`, so the token check covers everything the SDK can log.
 
 | File | Role |
 |---|---|
 | `run.php` | Suite. Writes the apps, starts the servers, sends the requests, and checks responses, session files, and logs. |
 | `../Support/HttpServer.php` | Starts and stops `php -S` and sends raw HTTP/1.1 requests. |
-| `../Support/EchoTool.php`, `FailingTool.php`, `CrashingTool.php` | Test tools. |
+| `../Support/EchoTool.php`, `FailingTool.php`, `CrashingTool.php`, `ClientTool.php` | Test tools. |
 
 ## Cases
 
@@ -29,6 +29,7 @@ Authentication:
 
 - No token gets 401 with `WWW-Authenticate: Bearer realm="mcp"` and no body; a wrong token adds `error="invalid_token"`; a token in another scheme is refused.
 - Both secret slots are accepted, and the scheme matches case-insensitively.
+- A tool receives the secret key that authenticated the request, and null when authentication is disabled.
 
 Routing and transport:
 
