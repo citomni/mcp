@@ -70,12 +70,13 @@ final class ServerFactory {
 	 * Build the MCP server with every configured tool.
 	 *
 	 * @param LoggerInterface $logger Logger for the SDK.
-	 * @param string|null $client Secret key that authenticated the request, passed to every tool; null when authentication is disabled.
+	 * @param string|null $client Stable authenticated identity; null when authentication is disabled.
+	 * @param bool $oauth Whether OAuth authenticated this request.
 	 * @return Server Server ready for run().
 	 * @throws McpConfigException When mcp.tools is invalid or a tool definition is rejected.
 	 * @throws \Mcp\Exception\RuntimeException When the session directory cannot be created or written.
 	 */
-	public function server(LoggerInterface $logger, ?string $client = null): Server {
+	public function server(LoggerInterface $logger, ?string $client = null, bool $oauth = false): Server {
 		$cfg = $this->app->cfg->mcp;
 		$ttlMs = (int)$cfg->cache->ttl_ms;
 
@@ -93,8 +94,14 @@ final class ServerFactory {
 				->withMethod('server/discover', $ttlMs))
 			->setLogger($logger);
 
+		$oauthScope = $oauth && (bool)($cfg->oauth->enabled ?? false)
+			? (string)$cfg->oauth->scope : null;
 		foreach ($this->tools() as $name => $class) {
-			$builder->add($this->definition($name, $class), new $class($this->app, $client));
+			$definition = $this->definition($name, $class);
+			if ($oauthScope !== null) {
+				$definition = new \CitOmni\Mcp\Support\OAuth\ToolDefinition($definition, $oauthScope);
+			}
+			$builder->add($definition, new $class($this->app, $client));
 		}
 
 		return $builder->build();

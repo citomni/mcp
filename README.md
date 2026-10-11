@@ -9,7 +9,8 @@ Model Context Protocol (MCP) server endpoint for CitOmni applications. Exposes t
 ## What this package is
 
 - One route, `POST /mcp` (and `DELETE /mcp` to end a session), contributed through the provider Registry.
-- Bearer-token authentication against secrets in the app's secrets store, checked before the SDK sees the request.
+- Fixed bearer-token authentication against the app's secrets store, checked before the SDK sees the request.
+- Optional single-owner OAuth for ChatGPT alongside fixed tokens: see [OAuth setup](docs/oauth.md).
 - Both protocol eras on the same endpoint, decided per request by the SDK:
   - the `initialize` handshake with sessions (revisions 2024-11-05 to 2025-11-25), with sessions stored as files;
   - the stateless 2026-07-28 lifecycle, with caching hints for `tools/list` and `server/discover`.
@@ -19,10 +20,10 @@ Model Context Protocol (MCP) server endpoint for CitOmni applications. Exposes t
 
 ## What this package does not do
 
-- OAuth. Clients that can only connect through OAuth, such as ChatGPT apps, cannot connect yet.
+- Multi-user account administration, public client registration, or an external identity provider.
 - Resources, prompts, and completions. Only tools are registered.
 - Server-initiated messages: no `GET` event stream, no subscriptions, no multi round-trip input requests.
-- Rate limiting, quotas, or per-user identities. One token identifies one client, not a person.
+- General MCP quotas or tool rate limiting. The optional owner approval flow has its own attempt limits.
 
 ---
 
@@ -115,7 +116,9 @@ The answer contains `"text":"pong 2026-10-10T08:52:00Z"`. A 401 means the token 
 
 The endpoint URL is the app's base URL plus `/mcp`, for example `https://www.example.com/mcp`. Use the host of `http.base_url`; another host gets 403 unless it is listed in `mcp.http.allowed_hosts`. Behind a reverse proxy that rewrites `Host`, list the host that PHP receives.
 
-**Claude (claude.ai, Desktop, mobile).** Add a custom connector with the endpoint URL. Under **Request headers**, add `authorization` with the value `Bearer <token>`, including `Bearer ` and the space. Claude sends the value exactly as entered. Request headers are a beta that not every organization has; without them the dialog shows no **Request headers** section, and this package offers no other way in. Headers cannot be edited later: remove the connector and add it again.
+**Claude (claude.ai, Desktop, mobile).** Add a custom connector with the endpoint URL. Under **Request headers**, add `authorization` with the value `Bearer <token>`, including `Bearer ` and the space. Claude sends the value exactly as entered. Request headers are a beta that not every organization has; without them the dialog shows no **Request headers** section, and use an OAuth-capable client setup instead; see [OAuth setup](docs/oauth.md). Headers cannot be edited later: remove the connector and add it again.
+
+**ChatGPT.** Enable the optional OAuth server and configure a custom MCP connection with the pre-registered client ID and secret. See [OAuth setup](docs/oauth.md). Existing Claude headers stay unchanged.
 
 **Claude Code.**
 
@@ -171,7 +174,7 @@ The package ships this baseline in `CFG_HTTP`. Override any key in the app's `co
 | `server.title` | Display name; null falls back to `name`. |
 | `server.instructions` | A usage hint that clients may add to the model's context, for example which tool to start with. null sends none. |
 | `tools` | Tool name => tool class. The map merges like any cfg map, so the app's tools come in addition to `ping`. `'ping' => null` removes a tool that an earlier layer added. |
-| `auth.secret_keys` | Keys in the secrets store whose values are accepted as bearer tokens. Keys missing from the store are skipped. `[]` disables authentication. |
+| `auth.secret_keys` | Keys in the secrets store whose values are accepted as bearer tokens. Keys missing from the store are skipped. `[]` disables fixed tokens; access is anonymous only when OAuth is also disabled. |
 | `http.allowed_hosts` | Hosts accepted in `Origin` or `Host` besides the host of `CITOMNI_PUBLIC_ROOT_URL`. Without port. |
 | `http.max_body_bytes` | Largest request body read. A larger body gets 413. |
 | `session.dir`, `session.ttl` | Where handshake-era sessions are stored (one file each) and how many seconds a session lives after its last request. |
@@ -247,7 +250,7 @@ The contract:
 - **Errors the model should see.** Throw `Mcp\Exception\ToolCallException`. The client gets a result with `isError: true` and the message, and the model can react, for example by correcting a path.
 - **Other exceptions.** Any other throwable is a server error. The client gets JSON-RPC -32603 without details, and the SDK logs the exception at `error` in `var/logs/mcp.jsonl`. These failures never reach the global error handler, because the SDK answers the client itself.
 - **Construction.** Every request that builds the server constructs every registered tool as `new $class($app, $client)`, also for `tools/list`. Keep the constructor and an optional `init()` cheap; resolve services in `execute()`.
-- **Client.** `$this->client` is the secret key whose token authenticated the request, for example `mcp.client_token.1`, or null when authentication is disabled. Use it to tell clients apart, for example to bind server-side state to the client that created it. It is never the token.
+- **Client.** `$this->client` is the secret key whose token authenticated the request, for example `mcp.client_token.1`, `oauth:<owner_id>:<client_id>` for OAuth, or null when authentication is disabled. Use it to tell clients apart, for example to bind server-side state to the client that created it. It is never the token.
 - **Annotations are hints.** `readOnlyHint` tells the client what the tool does; nothing enforces it. A tool that must not write must not be given the means to.
 
 A tool class that does not extend `BaseTool`, or a `DEFINITION` the SDK rejects, throws `McpConfigException` with the tool's name on every request. The global error handler answers 500 and logs it.
@@ -256,7 +259,7 @@ A tool class that does not extend `BaseTool`, or a `DEFINITION` the SDK rejects,
 
 ## Authentication
 
-Every request needs `Authorization: Bearer <token>`, where the token is the value of one of the secrets named in `mcp.auth.secret_keys`. The scheme matches case-insensitively, the token exactly, compared with `hash_equals()`.
+By default, every request needs `Authorization: Bearer <token>`, where the token is the value of one of the secrets named in `mcp.auth.secret_keys`. The scheme matches case-insensitively, the token exactly, compared with `hash_equals()`.
 
 | Situation | Answer |
 |---|---|
@@ -264,9 +267,10 @@ Every request needs `Authorization: Bearer <token>`, where the token is the valu
 | A token that matches no secret | 401, `WWW-Authenticate: Bearer realm="mcp", error="invalid_token"`, no body |
 | A secret named in `secret_keys` is empty | 500, `McpConfigException` |
 | None of the named secrets exists in the store | 500, `McpConfigException`, for every request, with or without a token |
-| `secret_keys` is `[]` | Every request is accepted |
+| `secret_keys` is `[]`, OAuth disabled | Every request is accepted |
+| `secret_keys` is `[]`, OAuth enabled | A valid OAuth access token is required |
 
-The access log names the secret key that matched (for example `mcp.client_token.1`), never the token.
+With OAuth enabled, unmatched fixed tokens are also checked as signed OAuth access tokens. A 401 includes protected-resource discovery metadata. The access log names the matching secret key (for example `mcp.client_token.1`) or stable OAuth identity, never the token.
 
 **Rotation.** The baseline names two keys, and a missing key is skipped. Put the new token under the free key, switch the client to it, then remove the old secret. No cfg change and no downtime.
 
@@ -311,7 +315,7 @@ Both kinds of line go to `var/logs/mcp.jsonl` through the `log` service, which r
 
 | Field | Content |
 |---|---|
-| `client` | The secret key that matched; absent on a 401 and when authentication is disabled |
+| `client` | The matching secret key or stable OAuth identity; absent on a 401 and when authentication is disabled |
 | `ip` | The public client IP from the Request service, or `unknown` |
 | `method` | The HTTP method |
 | `rpc` | The JSON-RPC method, or `batch` |
@@ -340,7 +344,7 @@ Configuration errors and failures to build the server do not appear here. They r
 
 ## Current limitations
 
-- No OAuth, so no client that requires it.
+- OAuth is optional and limited to one owner, one pre-registered confidential client, one resource and one scope; state must reside on one host. See [OAuth setup](docs/oauth.md).
 - Only tools; no resources, prompts, or completions.
 - No server-initiated messages: no `GET` event stream, no `subscriptions/listen`, no multi round-trip input requests (`setRequestState()` is not configured).
 - The server and every tool are built for each request. For a handful of tools this costs a few milliseconds; a very large tool map would call for lazy construction.

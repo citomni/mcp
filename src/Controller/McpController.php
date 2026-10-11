@@ -72,11 +72,25 @@ final class McpController extends BaseController {
 		$authorization = $this->app->request->header('Authorization')
 			?: $this->app->request->server('REDIRECT_HTTP_AUTHORIZATION');
 		$auth = (new ClientAuth($this->app))->evaluate(\is_string($authorization) ? $authorization : null);
+		if ($auth['oauth'] ?? false) {
+			$issuer = (string)$mcp->oauth->issuer;
+			if (!$this->app->request->isHttps() || $this->app->request->host() !== \parse_url($issuer, PHP_URL_HOST)
+				|| $this->app->request->port() !== (\parse_url($issuer, PHP_URL_PORT) ?? 443)) {
+				$response = $bridge->factory()->createResponse(403);
+				$this->logAccess($mcp, $auth['client'], '', $response, $startNs);
+				$bridge->emit($response);
+			}
+		}
 
 		if (!$auth['authorized']) {
+			$challenge = $auth['reason'] === 'invalid' ? 'Bearer realm="mcp", error="invalid_token"' : 'Bearer realm="mcp"';
+			if ((bool)($mcp->oauth->enabled ?? false)) {
+				$oauth = new \CitOmni\Mcp\Support\OAuth\Config($this->app);
+				$challenge .= ', resource_metadata="' . $oauth->issuer . '/.well-known/oauth-protected-resource/mcp", scope="' . $oauth->values['scope'] . '"';
+			}
 			$response = $bridge->factory()->createResponse(401)->withHeader(
 				'WWW-Authenticate',
-				$auth['reason'] === 'invalid' ? 'Bearer realm="mcp", error="invalid_token"' : 'Bearer realm="mcp"'
+				$challenge
 			);
 			$this->logAccess($mcp, null, '', $response, $startNs);
 			$bridge->emit($response);
@@ -88,7 +102,7 @@ final class McpController extends BaseController {
 		$logger = new SdkLogger($this->app, (string)$mcp->log->file, $sdkLevel === null ? null : (string)$sdkLevel);
 		$factory = new ServerFactory($this->app);
 		$transport = $factory->transport($bridge->request($body), $bridge->factory(), $logger);
-		$response = $factory->server($logger, $auth['client'])->run($transport);
+		$response = $factory->server($logger, $auth['client'], $auth['oauth'] ?? false)->run($transport);
 
 		// -- 3. Log and send ----------------------------------------------
 		$this->logAccess($mcp, $auth['client'], $body, $response, $startNs);
@@ -100,7 +114,7 @@ final class McpController extends BaseController {
 	 * Write the access-log line for this request, when enabled.
 	 *
 	 * Behavior:
-	 * - Records client (the matching secret key), IP, HTTP method, JSON-RPC
+	 * - Records client (the matching secret key or stable OAuth identity), IP, HTTP method, JSON-RPC
 	 *   method, tool name, HTTP status, JSON-RPC error code, whether the tool
 	 *   reported an error, and the duration in milliseconds.
 	 * - Fields that do not apply to the request are left out.

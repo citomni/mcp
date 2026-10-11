@@ -116,9 +116,40 @@ final class Registry {
 			// Keys in the secrets store (var/secrets/app.secret.<env>.php) whose values
 			// are accepted as bearer tokens. Keys missing from the store are skipped,
 			// so the second one can stay unset until a token is rotated. The list is
-			// replaced, not merged, by the app; [] disables authentication.
+			// replaced, not merged, by the app; [] disables fixed tokens; anonymous access also requires OAuth disabled.
 			'auth' => [
 				'secret_keys' => ['mcp.client_token.1', 'mcp.client_token.2'],
+			],
+
+			// Optional single-owner OAuth; fixed-token clients do not load it.
+			// The host must install league/oauth2-server ^9.4.1 before enabling it.
+			'oauth' => [
+				'enabled'                   => false,
+				'issuer'                    => null,
+				'scope'                     => 'mcp.access',
+				'owner_id'                  => 'owner',
+				'client_id'                 => 'chatgpt',
+				'client_name'               => 'ChatGPT',
+				'redirect_uris'             => [],
+				'consent_text'              => 'Allow this client to use the tools exposed by this MCP server.',
+				'texts'                     => [
+					'lang'             => 'en',
+					'title'            => 'Approve access',
+					'heading'          => 'Allow {client} to connect?',
+					'password'         => 'Your connection approval password',
+					'approve'          => 'Approve access',
+					'deny'             => 'Deny',
+					'invalid_password' => 'The password was not accepted.',
+				],
+				'owner_password_secret_key' => 'mcp.oauth.owner_password_hash',
+				'client_secret_key'         => 'mcp.oauth.client_secret',
+				'private_key_secret_key'    => 'mcp.oauth.private_key',
+				'public_key_secret_key'     => 'mcp.oauth.public_key',
+				'encryption_secret_key'     => 'mcp.oauth.encryption_key',
+				'state_dir'                 => \CITOMNI_APP_PATH . '/var/state/mcp_oauth',
+				'access_ttl'                => 900,
+				'refresh_ttl'               => 2_592_000,
+				'approval_ttl'              => 300,
 			],
 
 			'http' => [
@@ -182,6 +213,31 @@ final class Registry {
 			'controller' => \CitOmni\Mcp\Controller\McpController::class,
 			'action'     => 'handle',
 			'methods'    => ['POST', 'DELETE'],
+		],
+		'/.well-known/oauth-protected-resource/mcp' => [
+			'controller' => \CitOmni\Mcp\Controller\OAuthController::class,
+			'action' => 'resourceMetadata',
+			'methods' => ['GET'],
+		],
+		'/.well-known/oauth-protected-resource' => [
+			'controller' => \CitOmni\Mcp\Controller\OAuthController::class,
+			'action' => 'resourceMetadata',
+			'methods' => ['GET'],
+		],
+		'/.well-known/oauth-authorization-server' => [
+			'controller' => \CitOmni\Mcp\Controller\OAuthController::class,
+			'action' => 'metadata',
+			'methods' => ['GET'],
+		],
+		'/mcp/oauth/authorize' => [
+			'controller' => \CitOmni\Mcp\Controller\OAuthController::class,
+			'action' => 'authorize',
+			'methods' => ['GET', 'POST'],
+		],
+		'/mcp/oauth/token' => [
+			'controller' => \CitOmni\Mcp\Controller\OAuthController::class,
+			'action' => 'token',
+			'methods' => ['POST'],
 		],
 	];
 
