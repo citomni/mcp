@@ -30,10 +30,13 @@ approval password and OAuth client secret once. Store both in a password manager
 It refuses to overwrite a file. The file contains a password hash, client secret,
 RSA signing key pair and a Defuse encryption key; never commit it.
 
-Merge the generated array into the environment's secrets store without removing
-existing secrets. For example, change the end of `app.secret.prod.php` from
-`];` to `] + require __DIR__ . '/mcp.oauth.secret.php';`. Keep existing fixed tokens
-and backend credentials. The generated file alone is not automatically loaded.
+Copy the five generated `mcp.oauth.*` entries directly into the existing array
+in the environment's secrets store, preserving their values and all existing
+fixed tokens and backend credentials. Keep this store self-contained and
+returning a flat `array<string,string>`; the generated file alone is not loaded.
+Do not leave a `require` dependency on `mcp.oauth.secret.php` when using CitOmni
+DevKit deployment: it transfers `app.secret.<env>.php`, not included files.
+Keep both files out of Git and never regenerate active keys just to move them.
 
 Add an HTTP environment overlay:
 
