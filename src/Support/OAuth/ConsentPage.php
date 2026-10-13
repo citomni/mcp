@@ -18,18 +18,28 @@ namespace CitOmni\Mcp\Support\OAuth;
 use Nyholm\Psr7\Response;
 use Psr\Http\Message\ResponseInterface;
 
-/** ConsentPage: Small escaped approval view with host-configurable labels. */
+/**
+ * ConsentPage: Support class that renders the owner approval page.
+ *
+ * Renders a small self-contained HTML page without the host's TemplateEngine, theme or session,
+ * so that the approval page works the same in every host. Its labels are cfg, so that a host can
+ * translate it.
+ *
+ * Rules:
+ * - Escape every value that comes from cfg or from the caller.
+ * - Keep the page self-contained: inline styles only, no scripts and no external resources.
+ */
 final class ConsentPage {
 
 	/**
-	 * Render without starting a session or loading the host theme.
+	 * Build the approval page response.
 	 *
-	 * @param Config $config Validated OAuth settings.
+	 * @param Config $config Validated OAuth cfg.
 	 * @param string $id Pending approval ID.
-	 * @param string $csrf Browser form CSRF value.
-	 * @param string $error Host-selected error message.
-	 * @param int $status HTTP status chosen by the transport adapter.
-	 * @return ResponseInterface Escaped HTML response without secrets.
+	 * @param string $csrf CSRF value for the form.
+	 * @param string $error Message shown above the form; '' shows none.
+	 * @param int $status HTTP status.
+	 * @return ResponseInterface An HTML response without secrets.
 	 */
 	public static function response(Config $config, string $id, string $csrf, string $error = '', int $status = 200): ResponseInterface {
 		$escape = static fn(string $s): string => \htmlspecialchars($s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
@@ -47,5 +57,6 @@ final class ConsentPage {
 			. '<button type="submit" name="decision" value="deny">' . $escape($labels['deny']) . '</button></form></main></html>';
 		return new Response($status, ['Content-Type' => 'text/html; charset=utf-8'], $html);
 	}
+
 
 }

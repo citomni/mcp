@@ -24,28 +24,36 @@ use League\OAuth2\Server\Entities\Traits\EntityTrait;
 use League\OAuth2\Server\Entities\Traits\TokenEntityTrait;
 
 /**
- * Issue an RS256 JWT bound to the MCP resource, issuer, owner and OAuth client.
+ * AccessToken: League entity that serializes an access token as an RS256 JWT for the MCP resource.
  *
- * League's default audience is the client ID. MCP requires the resource as
- * audience, so signing uses Lcobucci's builder with an explicit client_id claim.
+ * MCP requires the protected resource as the audience of an access token, so this entity signs
+ * its own JWT instead of using League's serialization: the issuer, the resource as audience,
+ * the owner as subject and the client in an explicit client_id claim.
+ *
+ * Rules:
+ * - Sign with RS256 only.
+ * - Put no secret into a token.
  */
 final class AccessToken implements AccessTokenEntityInterface {
 	use EntityTrait;
 	use TokenEntityTrait;
 
+	/** Private key that signs the token; set by League before it serializes the token. */
 	private CryptKeyInterface $privateKey;
 
+
 	/**
-	 * Retain the explicit dependencies and immutable entity values.
+	 * Bind the token to the issuer and to the MCP resource it is issued for.
 	 *
 	 * @param string $issuer Canonical authorization server origin.
-	 * @param string $resource MCP resource audience.
+	 * @param string $resource MCP resource identifier, used as the audience.
 	 */
 	public function __construct(private readonly string $issuer, private readonly string $resource) {
 	}
 
+
 	/**
-	 * Retain the signing key for the subsequent token serialization.
+	 * Keep the signing key for the serialization that follows.
 	 *
 	 * @param CryptKeyInterface $privateKey Private signing key.
 	 * @return void
@@ -54,7 +62,16 @@ final class AccessToken implements AccessTokenEntityInterface {
 		$this->privateKey = $privateKey;
 	}
 
-	/** {@inheritDoc} */
+
+	/**
+	 * Serialize the token as a signed JWT.
+	 *
+	 * Behavior:
+	 * - Claims: iss (the issuer), aud (the resource), jti (the token identifier), sub (the owner),
+	 *   iat and nbf (now), exp (the expiry League set), client_id and scopes.
+	 *
+	 * @return string The compact JWT.
+	 */
 	public function toString(): string {
 		$jwt = Configuration::forAsymmetricSigner(new Sha256(),
 			InMemory::plainText($this->privateKey->getKeyContents(), $this->privateKey->getPassPhrase() ?? ''),
@@ -67,4 +84,6 @@ final class AccessToken implements AccessTokenEntityInterface {
 			->withClaim('scopes', $this->getScopes())
 			->getToken($jwt->signer(), $jwt->signingKey())->toString();
 	}
+
+
 }

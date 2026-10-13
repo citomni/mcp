@@ -17,15 +17,25 @@ namespace CitOmni\Mcp\Support\OAuth;
 
 use CitOmni\Kernel\App;
 
-/** Audit: Record OAuth lifecycle outcomes using only server-controlled fields. */
+/**
+ * Audit: Support class that writes OAuth audit events to the MCP log.
+ *
+ * Gives every OAuth step one audit line shape, built from server-controlled fields only, so
+ * that no request value can reach the audit log.
+ *
+ * Rules:
+ * - Accept only server-selected values; never request bodies, tokens, codes, passwords or
+ *   exception messages.
+ */
 final class Audit {
+
 	/**
-	 * Append one event; never accept request bodies, tokens or exception messages.
+	 * Write one audit line with the category mcp.oauth.
 	 *
-	 * @param App $app Application providing the log service and configuration.
+	 * @param App $app App whose log service and cfg mcp are used.
 	 * @param string $event Server-selected lifecycle event.
 	 * @param string $outcome Server-selected outcome or OAuth error type.
-	 * @param string $ip Client address resolved by the trusted request service.
+	 * @param string $ip Client address resolved by the Request service.
 	 * @return void
 	 */
 	public static function record(App $app, string $event, string $outcome, string $ip): void {
@@ -36,4 +46,6 @@ final class Audit {
 			'ip'      => $ip,
 		]);
 	}
+
+
 }

@@ -49,7 +49,12 @@ if (!\class_exists(\Defuse\Crypto\Key::class)) {
 
 $key = \openssl_pkey_new(['private_key_bits' => 3072, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
 if ($key === false || !\openssl_pkey_export($key, $private)) {
-	throw new \RuntimeException('Cannot generate OAuth signing key.');
+	$errors = [];
+	while (($error = \openssl_error_string()) !== false) {
+		$errors[] = $error;
+	}
+	throw new \RuntimeException('Cannot generate OAuth signing key: ' . \implode('; ', $errors)
+		. ' (on Windows, set OPENSSL_CONF to the openssl.cnf in the extras\\ssl directory of PHP).');
 }
 $details = \openssl_pkey_get_details($key);
 if ($details === false) {

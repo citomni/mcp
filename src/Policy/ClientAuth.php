@@ -18,42 +18,28 @@ namespace CitOmni\Mcp\Policy;
 use CitOmni\Kernel\App;
 use CitOmni\Kernel\Cfg;
 use CitOmni\Mcp\Exception\McpConfigException;
+use CitOmni\Mcp\Support\OAuth\Config;
 
 /**
- * ClientAuth: Decide whether an MCP request carries a valid bearer token.
+ * ClientAuth: Policy that decides whether an MCP request carries an accepted bearer token.
  *
- * The accepted tokens are the values of the secrets named in
- * mcp.auth.secret_keys. They live in the app's secrets store
- * (var/secrets/app.secret.<env>.php), never in cfg.
+ * Accepts the fixed tokens whose values live in the app's secrets service and, when OAuth is
+ * enabled, OAuth access tokens. It decides only; answering the request belongs to the
+ * controller.
  *
- * Behavior:
- * - An empty mcp.auth.secret_keys disables fixed-token authentication. Requests
- *   are anonymous only if OAuth is also disabled; otherwise OAuth is required.
- * - Otherwise the configured secrets are resolved first, so a broken
- *   configuration fails on every request, not only on authenticated ones:
- *   1) Keys missing from the store are skipped (a free rotation slot)
- *   2) A key whose value is empty is a configuration error
- *   3) No key present at all is a configuration error
- * - The Authorization header must be "Bearer <token>" (scheme case-insensitive).
- *   The token is compared with each secret by hash_equals(), in the order of
- *   mcp.auth.secret_keys.
- *
- * Notes:
- * - The result names the matching secret key, or a stable OAuth owner/client ID.
- *   Neither the token nor a secret value ever leaves this class, and the header
- *   argument is #[\SensitiveParameter], so stack traces of a configuration error
- *   do not carry it either.
- * - Rotation: put the new token under the free key, switch the client, then
- *   remove the old secret. No cfg change and no downtime.
- *
- * Typical usage:
- *   $auth = (new ClientAuth($this->app))->evaluate($authorizationHeader);
- *   if (!$auth['authorized']) {
- *       // 401, with error="invalid_token" when $auth['reason'] === 'invalid'
- *   }
+ * Rules:
+ * - Never let a token or a secret value leave the class: a result names the secret key or the
+ *   OAuth identity, and a parameter that carries a token is #[\SensitiveParameter].
+ * - Check fixed tokens before OAuth, so that a request with a fixed token never loads the OAuth
+ *   library or its keys.
  */
 final class ClientAuth {
 
+	/**
+	 * Create the policy for the app whose cfg and secrets hold the accepted tokens.
+	 *
+	 * @param App $app App whose cfg holds mcp.auth and mcp.oauth.
+	 */
 	public function __construct(private readonly App $app) {
 	}
 
@@ -61,12 +47,40 @@ final class ClientAuth {
 	/**
 	 * Decide whether the request is authorized.
 	 *
+	 * The configured secrets are resolved before the header is looked at, so that a broken
+	 * configuration fails on every request, not only on requests with a token.
+	 *
+	 * Behavior:
+	 * - Authorized with reason disabled and no client when mcp.auth.secret_keys is [] and OAuth
+	 *   is disabled.
+	 * - Configuration errors, whatever the header holds:
+	 *     - A key whose secret is empty.
+	 *     - A non-empty mcp.auth.secret_keys of which no key exists in the store. Keys missing
+	 *       from the store are skipped otherwise.
+	 * - Reason missing without a "Bearer <token>" header; the scheme matches case-insensitively.
+	 * - Authorized with reason accepted when the token equals a secret, compared with
+	 *   hash_equals() in the order of mcp.auth.secret_keys. client is that secret's key.
+	 * - With OAuth enabled, a token that equals no secret is validated as an OAuth access token.
+	 *   A valid one is authorized with reason accepted, oauth true and client
+	 *   oauth:<owner_id>:<client_id>.
+	 * - Reason invalid for any other token.
+	 *
+	 * Typical usage:
+	 *   $auth = (new ClientAuth($this->app))->evaluate($authorizationHeader);
+	 *   if (!$auth['authorized']) {
+	 *       // 401, with error="invalid_token" when $auth['reason'] === 'invalid'
+	 *   }
+	 *
 	 * @param string|null $authorization Raw Authorization header value, or null when absent.
 	 * @return array{authorized: bool, client: string|null, reason: 'accepted'|'disabled'|'missing'|'invalid', oauth?: bool}
-	 *         client is the matching secret key or stable OAuth identity; null on failure or anonymous access.
-	 * @throws McpConfigException When mcp.auth.secret_keys is not a list of strings, names an
-	 *                            empty secret, or names no secret that exists.
+	 *         client is the matching secret key or OAuth identity; null on failure or anonymous access.
+	 * @throws McpConfigException When mcp.auth.secret_keys is not a list of non-empty strings, names an empty
+	 *                            secret, or names no secret that exists; when mcp.oauth.enabled is read and is
+	 *                            not a bool; or, for a token that equals no secret while OAuth is enabled, when
+	 *                            league/oauth2-server is missing, mcp.oauth is invalid, or the public-key secret
+	 *                            is missing or empty.
 	 * @throws \InvalidArgumentException When a configured key is padded with whitespace (secrets service).
+	 * @see \CitOmni\Mcp\Policy\OAuthAccess::client()  How an OAuth access token is validated.
 	 */
 	public function evaluate(#[\SensitiveParameter] ?string $authorization): array {
 
@@ -74,7 +88,7 @@ final class ClientAuth {
 		$keys = $this->app->cfg->mcp->auth->secret_keys;
 		$keys = $keys instanceof Cfg ? $keys->toArray() : $keys;
 
-		if ($keys === [] && !(bool)($this->app->cfg->mcp->oauth->enabled ?? false)) {
+		if ($keys === [] && !Config::enabled($this->app)) {
 			return ['authorized' => true, 'client' => null, 'reason' => 'disabled'];
 		}
 
@@ -122,8 +136,7 @@ final class ClientAuth {
 			}
 		}
 
-		// Fixed tokens retain their original fast path and client identity.
-		if ((bool)($this->app->cfg->mcp->oauth->enabled ?? false)) {
+		if (Config::enabled($this->app)) {
 			$client = (new OAuthAccess($this->app))->client($authorization);
 			if ($client !== null) {
 				return ['authorized' => true, 'client' => $client, 'reason' => 'accepted', 'oauth' => true];
@@ -132,5 +145,6 @@ final class ClientAuth {
 
 		return ['authorized' => false, 'client' => null, 'reason' => 'invalid'];
 	}
+
 
 }

@@ -18,37 +18,25 @@ namespace CitOmni\Mcp\Controller;
 use CitOmni\Kernel\Cfg;
 use CitOmni\Kernel\Controller\BaseController;
 use CitOmni\Mcp\Policy\ClientAuth;
+use CitOmni\Mcp\Support\OAuth\Config;
 use CitOmni\Mcp\Support\Psr7Bridge;
 use CitOmni\Mcp\Support\SdkLogger;
 use CitOmni\Mcp\Support\ServerFactory;
 use Psr\Http\Message\ResponseInterface;
 
 /**
- * McpController: The Model Context Protocol endpoint, /mcp by default.
+ * McpController: HTTP adapter for the Model Context Protocol endpoint.
  *
- * One endpoint serves both protocol eras: the initialize handshake with
- * sessions (2024-11-05 ... 2025-11-25) and the stateless 2026-07-28 lifecycle.
- * The SDK decides per request which one answers.
+ * Connects the CitOmni HTTP runtime to the MCP SDK, which serves both protocol eras and tells
+ * them apart per request. The controller authenticates the request and sends the SDK's
+ * response; what a tool does belongs to the tool.
  *
- * Behavior:
- * - Authenticates the bearer token before the SDK sees the request (see
- *   ClientAuth). A request without a valid token gets 401 with a
- *   WWW-Authenticate challenge and no body.
- * - Builds the server and its transport from cfg mcp (see ServerFactory), runs
- *   the request through them, and emits the SDK's response.
- * - Writes one access-log line per request when mcp.log.access is true, before
- *   the response is sent.
- * - Ends the script after the response, so nothing the Kernel appends (such as
- *   the ?_perf footer) can corrupt the JSON-RPC body.
- *
- * Notes:
- * - Tool failures never reach the global error handler. The SDK turns them
- *   into JSON-RPC results or errors and logs unexpected exceptions through
- *   SdkLogger (mcp.log.sdk_level).
- * - Configuration errors (McpConfigException) and failures to build the
- *   server bubble to the global error handler, which answers 500.
- * - The route allows POST and DELETE. The router answers OPTIONS itself and
- *   every other method with 405.
+ * Rules:
+ * - Authenticate before the SDK sees the request, and never give the SDK the Authorization
+ *   header.
+ * - Send every response through Psr7Bridge::emit(), so that nothing the Kernel appends can
+ *   corrupt a JSON-RPC body.
+ * - Let configuration errors reach the global error handler.
  */
 final class McpController extends BaseController {
 
@@ -59,8 +47,28 @@ final class McpController extends BaseController {
 	/**
 	 * Handle one MCP request.
 	 *
+	 * Authenticates the request, runs it through the SDK and sends the SDK's response.
+	 *
+	 * Behavior:
+	 * - 401 with a WWW-Authenticate challenge and no body when the request carries no accepted
+	 *   token:
+	 *     - error="invalid_token" when it carries a token that was not accepted.
+	 *     - With OAuth enabled, the challenge also names the protected-resource metadata and the
+	 *       scope.
+	 * - 403 when an OAuth access token arrives over another scheme, host or port than the
+	 *   issuer's.
+	 * - Otherwise the SDK's response to the request.
+	 * - One access-log line per request when mcp.log.access is true, written before the response
+	 *   is sent.
+	 * - Ends the script after the response.
+	 *
+	 * Notes:
+	 * - Assumes that the SDK answers a failing tool itself. Such a failure then reaches the log
+	 *   through SdkLogger, never the global error handler.
+	 *
 	 * @return never
-	 * @throws \CitOmni\Mcp\Exception\McpConfigException When cfg mcp or the configured secrets are invalid.
+	 * @throws \CitOmni\Mcp\Exception\McpConfigException When cfg mcp, the configured secrets or a tool definition are invalid, or OAuth is enabled and league/oauth2-server is missing.
+	 * @see \CitOmni\Mcp\Policy\ClientAuth::evaluate()  Which tokens are accepted.
 	 */
 	public function handle(): never {
 		$startNs = \hrtime(true);
@@ -84,8 +92,8 @@ final class McpController extends BaseController {
 
 		if (!$auth['authorized']) {
 			$challenge = $auth['reason'] === 'invalid' ? 'Bearer realm="mcp", error="invalid_token"' : 'Bearer realm="mcp"';
-			if ((bool)($mcp->oauth->enabled ?? false)) {
-				$oauth = new \CitOmni\Mcp\Support\OAuth\Config($this->app);
+			if (Config::enabled($this->app)) {
+				$oauth = new Config($this->app);
 				$challenge .= ', resource_metadata="' . $oauth->issuer . '/.well-known/oauth-protected-resource/mcp", scope="' . $oauth->values['scope'] . '"';
 			}
 			$response = $bridge->factory()->createResponse(401)->withHeader(
@@ -114,14 +122,14 @@ final class McpController extends BaseController {
 	 * Write the access-log line for this request, when enabled.
 	 *
 	 * Behavior:
-	 * - Records client (the matching secret key or stable OAuth identity), IP, HTTP method, JSON-RPC
-	 *   method, tool name, HTTP status, JSON-RPC error code, whether the tool
-	 *   reported an error, and the duration in milliseconds.
-	 * - Fields that do not apply to the request are left out.
+	 * - Writes nothing when mcp.log.access is false.
+	 * - Records the client, IP, HTTP method, JSON-RPC method, tool name, HTTP status, JSON-RPC
+	 *   error code, whether the tool reported an error, and the duration in milliseconds.
+	 * - Leaves out the fields that do not apply to the request.
 	 *
 	 * @param Cfg $mcp The mcp cfg node.
-	 * @param string|null $client Secret key that authenticated the request, or null.
-	 * @param string $body Raw request body ('' when not read).
+	 * @param string|null $client Secret key or OAuth identity that authenticated the request, or null.
+	 * @param string $body Raw request body; '' when it was not read.
 	 * @param ResponseInterface $response Response about to be sent.
 	 * @param int $startNs hrtime() at the start of the request.
 	 * @return void
@@ -155,7 +163,7 @@ final class McpController extends BaseController {
 	 * Extract the JSON-RPC method and tool name from a request body.
 	 *
 	 * @param string $body Raw request body.
-	 * @return array{0: string|null, 1: string|null} [method or "batch", tool name for tools/call].
+	 * @return array{0: string|null, 1: string|null} [method or "batch", tool name for tools/call], each cut to LOG_NAME_MAX bytes.
 	 */
 	private static function describeRequest(string $body): array {
 		$message = $body === '' ? null : \json_decode($body, true);
@@ -181,7 +189,7 @@ final class McpController extends BaseController {
 	 * Extract the JSON-RPC error code and the tool error flag from a JSON response.
 	 *
 	 * @param ResponseInterface $response Response about to be sent.
-	 * @return array{0: int|null, 1: true|null} [error code, true when a tool result has isError].
+	 * @return array{0: int|null, 1: true|null} [error code, true when a tool result has isError]; both null for a body that is not seekable JSON.
 	 */
 	private static function describeResponse(ResponseInterface $response): array {
 		$body = $response->getBody();
@@ -203,5 +211,6 @@ final class McpController extends BaseController {
 			($message['result']['isError'] ?? false) === true ? true : null,
 		];
 	}
+
 
 }

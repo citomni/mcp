@@ -15,19 +15,28 @@ declare(strict_types=1);
 
 namespace CitOmni\Mcp\Support\OAuth;
 
-use League\OAuth2\Server\Entities\UserEntityInterface;
 use League\OAuth2\Server\Entities\Traits\EntityTrait;
+use League\OAuth2\Server\Entities\UserEntityInterface;
 
-/** The configured owner, created only after password and consent validation. */
+/**
+ * User: League entity for the one configured resource owner.
+ *
+ * Rules:
+ * - Create it only after the owner's decision has been validated, and for an approval only after
+ *   the owner's password has been verified.
+ */
 final class User implements UserEntityInterface {
 	use EntityTrait;
 
+
 	/**
-	 * Retain the explicit dependencies and immutable entity values.
+	 * Describe the configured owner.
 	 *
-	 * @param string $id Server-generated token or family identifier.
+	 * @param string $id Owner identifier.
 	 */
 	public function __construct(string $id) {
 		$this->identifier = $id;
 	}
+
+
 }

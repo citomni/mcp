@@ -25,14 +25,16 @@ declare(strict_types=1);
  *   with a class_alias double, and mcp/sdk is a Composer dependency, so they
  *   load the real packages.
  * - The case runner: test() runs one named case and reports PASS or FAIL;
- *   done() prints the totals and ends the suite with its exit code.
+ *   parallel() runs a multi-process case only with CITOMNI_TEST_PARALLEL=1 and
+ *   reports SKIP otherwise; done() prints the totals and ends the suite with
+ *   its exit code.
  * - check() and tempDir().
  *
  * Notes:
  * - Files a suite writes live below one run directory,
  *   citomni_mcp_<suite>_test_<random> under sys_get_temp_dir(), created on
  *   first use and removed at shutdown. Nothing else is ever removed.
- * - No case is optional, so nothing reports SKIP.
+ * - parallel() is the only way a case is skipped.
  */
 
 /** A failed check: the case fails with the check's message. */
@@ -40,7 +42,12 @@ final class CheckFailed extends \RuntimeException {
 }
 
 
-/** Report a fatal setup problem on STDERR and stop. */
+/**
+ * Report a fatal setup problem on STDERR and stop the suite with exit code 1.
+ *
+ * @param string $message Problem.
+ * @return never
+ */
 function fail(string $message): never {
 	\fwrite(\STDERR, $message . "\n");
 	exit(1);
@@ -58,6 +65,7 @@ require \dirname(__DIR__) . '/vendor/autoload.php';
 
 $passed = 0;
 $failed = 0;
+$skipped = 0;
 
 
 /**
@@ -95,14 +103,40 @@ function test(string $name, \Closure $case): void {
 
 
 /**
+ * Run one multi-process case when CITOMNI_TEST_PARALLEL is 1, and skip it otherwise.
+ *
+ * Behavior:
+ * - With CITOMNI_TEST_PARALLEL=1, runs the case as test() does.
+ * - Otherwise reports SKIP <name>: <how to enable it> on stdout and counts the
+ *   case as skipped.
+ *
+ * @param string $name Case name, shown in the report.
+ * @param \Closure $case The case.
+ * @return void
+ */
+function parallel(string $name, \Closure $case): void {
+	global $skipped;
+
+	if (\getenv('CITOMNI_TEST_PARALLEL') === '1') {
+		test($name, $case);
+
+		return;
+	}
+
+	++$skipped;
+	\fwrite(\STDOUT, "SKIP {$name}: set CITOMNI_TEST_PARALLEL=1 to run multi-process checks\n");
+}
+
+
+/**
  * Print the totals and end the suite: exit code 1 when a case failed.
  *
  * @return never
  */
 function done(): never {
-	global $passed, $failed;
+	global $passed, $failed, $skipped;
 
-	\fwrite(\STDOUT, "{$passed} passed, {$failed} failed\n");
+	\fwrite(\STDOUT, "{$passed} passed, {$failed} failed" . ($skipped > 0 ? ", {$skipped} skipped" : '') . "\n");
 	exit($failed === 0 ? 0 : 1);
 }
 

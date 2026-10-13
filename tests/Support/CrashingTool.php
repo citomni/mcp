@@ -19,12 +19,17 @@ use CitOmni\Mcp\Tool\BaseTool;
 use Mcp\Server\ClientGateway;
 
 /**
- * Test tool: fail the way a bug does, with an exception the client must not see.
+ * CrashingTool: Test tool that fails the way a bug does.
+ *
+ * Throws an unexpected exception whose message holds a server path, so the suites can check that
+ * the client never sees it.
  */
 final class CrashingTool extends BaseTool {
 
+	/** Message of the exception, with a server path that no client may see. */
 	public const string MESSAGE = 'Crashed on purpose: /srv/secret/path';
 
+	/** MCP definition of the tool: no arguments. */
 	public const array DEFINITION = [
 		'description' => 'Always fail with an unexpected exception.',
 		'inputSchema' => ['type' => 'object', 'properties' => []],
@@ -32,13 +37,16 @@ final class CrashingTool extends BaseTool {
 
 
 	/**
+	 * Fail with an unexpected exception.
+	 *
 	 * @param array<string, mixed> $arguments Unused.
 	 * @param ClientGateway $gateway Unused.
 	 * @return never
-	 * @throws \RuntimeException Always.
+	 * @throws \RuntimeException Always, with MESSAGE.
 	 */
 	public function execute(array $arguments, ClientGateway $gateway): never {
 		throw new \RuntimeException(self::MESSAGE);
 	}
+
 
 }

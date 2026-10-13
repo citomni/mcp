@@ -31,25 +31,42 @@ use Lcobucci\JWT\Validation\Constraint\StrictValidAt;
 use Psr\Clock\ClockInterface;
 
 /**
- * Validate OAuth JWTs locally, then check the persisted revocation record.
+ * OAuthAccess: Policy that decides whether a bearer header holds a valid OAuth access token.
  *
- * A token must match issuer, resource, owner, client and scope. Only RS256 is
- * accepted. The stable result identity is independent of token rotation.
+ * Validates access tokens locally with the public key and then checks their persisted record,
+ * so that the MCP endpoint needs no call to the authorization server. Only tokens for the one
+ * configured issuer, resource, owner, client and scope are accepted.
+ *
+ * Rules:
+ * - Accept RS256 tokens only.
+ * - Reject a token by returning null; throw only for configuration errors.
+ * - Never let a token into an exception argument or a log.
  */
 final class OAuthAccess {
+
 	/**
-	 * Retain the explicit dependencies and immutable entity values.
+	 * Create the policy for the app whose cfg and secrets describe the OAuth server.
 	 *
-	 * @param App $app Application configuration and services.
+	 * @param App $app App whose cfg holds mcp.oauth.
 	 */
 	public function __construct(private readonly App $app) {
 	}
 
+
 	/**
-	 * Validate the signed access token and resolve its stable owner/client identity.
+	 * Validate the access token in a bearer header and resolve its stable client identity.
 	 *
-	 * @param string|null $authorization Raw bearer header, excluded from exception arguments.
-	 * @return ?string Validated result.
+	 * Behavior:
+	 * - Returns oauth:<owner_id>:<client_id> for a token that is signed with the configured key,
+	 *   issued by the issuer for the resource, valid now by its iat, nbf and exp, and issued to
+	 *   the configured owner, client and scope, and whose record exists in the current
+	 *   authorization context and is not revoked.
+	 * - Returns null for anything else, including a missing or malformed header, a header longer
+	 *   than 16,384 bytes and a public key that cannot be parsed.
+	 *
+	 * @param string|null $authorization Raw Authorization header value, or null when absent.
+	 * @return string|null The identity, or null when the header holds no valid access token.
+	 * @throws \CitOmni\Mcp\Exception\McpConfigException When league/oauth2-server is missing, mcp.oauth is invalid, or the public-key secret is missing or empty.
 	 */
 	public function client(#[\SensitiveParameter] ?string $authorization): ?string {
 		if ($authorization === null || \strlen($authorization) > 16384
@@ -74,19 +91,23 @@ final class OAuthAccess {
 				return null;
 			}
 		} catch (JwtException) {
+			// A malformed token, or a public key that cannot be parsed, fails like a bad signature:
+			// the token is rejected.
 			return null;
 		}
 
-		$c = $token->claims();
-		$id = $c->get('jti');
+		$claims = $token->claims();
+		$id = $claims->get('jti');
 		if (!\is_string($id) || \preg_match('/^[a-f0-9]{80}$/D', $id) !== 1
-			|| $c->get('sub') !== $config->values['owner_id']
-			|| $c->get('client_id') !== $config->values['client_id']
-			|| $c->get('scopes') !== [$config->values['scope']]
+			|| $claims->get('sub') !== $config->values['owner_id']
+			|| $claims->get('client_id') !== $config->values['client_id']
+			|| $claims->get('scopes') !== [$config->values['scope']]
 			|| (new OAuthRepository($this->app))->isAccessTokenRevoked($id)) {
 			return null;
 		}
 
 		return 'oauth:' . $config->values['owner_id'] . ':' . $config->values['client_id'];
 	}
+
+
 }

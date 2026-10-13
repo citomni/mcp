@@ -19,17 +19,20 @@ use League\OAuth2\Server\Entities\ClientEntityInterface;
 use League\OAuth2\Server\Entities\Traits\ClientTrait;
 use League\OAuth2\Server\Entities\Traits\EntityTrait;
 
-/** A single pre-registered confidential OAuth client. */
+/**
+ * Client: League entity for the one pre-registered confidential OAuth client.
+ */
 final class Client implements ClientEntityInterface {
 	use ClientTrait;
 	use EntityTrait;
 
+
 	/**
-	 * Retain the explicit dependencies and immutable entity values.
+	 * Describe the configured client.
 	 *
-	 * @param string $id Server-generated token or family identifier.
-	 * @param string $name User-facing client name.
-	 * @param array $redirectUris Exact registered HTTPS callbacks.
+	 * @param string $id Client ID.
+	 * @param string $name Display name.
+	 * @param list<string> $redirectUris Exact registered HTTPS callbacks.
 	 */
 	public function __construct(string $id, string $name, array $redirectUris) {
 		$this->identifier = $id;
@@ -37,4 +40,6 @@ final class Client implements ClientEntityInterface {
 		$this->redirectUri = $redirectUris;
 		$this->isConfidential = true;
 	}
+
+
 }

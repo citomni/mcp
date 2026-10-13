@@ -15,8 +15,8 @@ declare(strict_types=1);
 
 namespace CitOmni\Mcp\Tests;
 
-use CitOmni\Mcp\Tests\Support\CrashingTool;
 use CitOmni\Mcp\Tests\Support\ClientTool;
+use CitOmni\Mcp\Tests\Support\CrashingTool;
 use CitOmni\Mcp\Tests\Support\EchoTool;
 use CitOmni\Mcp\Tests\Support\FailingTool;
 use CitOmni\Mcp\Tests\Support\HttpServer;
@@ -40,8 +40,8 @@ if (\PHP_SAPI !== 'cli') {
 	throw new \RuntimeException('CLI only.');
 }
 
-// Fail fast on every diagnostic, including deprecations. Like the production ErrorHandler,
-// leave diagnostics silenced with @ (socket probes, process control) to PHP.
+// Fail fast on every diagnostic, including deprecations. Leave diagnostics silenced with @
+// (socket probes, process control) to PHP.
 \set_error_handler(static function (int $errno, string $errstr, string $errfile, int $errline): bool {
 	if ((\error_reporting() & $errno) === 0) {
 		return false;

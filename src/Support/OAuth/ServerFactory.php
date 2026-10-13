@@ -23,22 +23,45 @@ use League\OAuth2\Server\CryptKey;
 use League\OAuth2\Server\Grant\AuthCodeGrant;
 use League\OAuth2\Server\Grant\RefreshTokenGrant;
 
-/** Construct League only for an OAuth endpoint; no discovery or network calls. */
+/**
+ * ServerFactory: Support class that builds the League authorization server for an OAuth endpoint.
+ *
+ * Keeps the League setup in one place, so that the approval and token endpoints use the same
+ * grants, keys and lifetimes. League is an optional dependency of the package, so this class
+ * also owns the check that it is installed.
+ *
+ * Rules:
+ * - Enable only the authorization-code and refresh-token grants.
+ * - Read keys and lifetimes through Config, never from cfg directly.
+ * - Make no network calls and use no discovery.
+ */
 final class ServerFactory {
+
+	/** Lifetime of an authorization code, as an ISO 8601 duration. */
+	private const string AUTH_CODE_TTL = 'PT60S';
+
+
 	/**
-	 * Construct the League authorization server with the two supported grants.
+	 * Build the League authorization server with the authorization-code and refresh-token grants.
 	 *
-	 * @param OAuthRepository $repository Repository shared by the League grant adapters.
-	 * @return AuthorizationServer Validated result.
+	 * Behavior:
+	 * - Authorization codes live AUTH_CODE_TTL; access and refresh tokens live for
+	 *   mcp.oauth.access_ttl and mcp.oauth.refresh_ttl seconds.
+	 * - mcp.oauth.scope is the default scope.
+	 *
+	 * @param OAuthRepository $repository Repository that serves every League repository interface for this request.
+	 * @return AuthorizationServer The configured server.
+	 * @throws McpConfigException When the private-key or encryption secret is missing or empty.
+	 * @throws \LogicException When the private-key secret is not a readable PEM key (League).
+	 * @throws \Defuse\Crypto\Exception\BadFormatException When the encryption secret is not a Defuse key.
 	 */
 	public static function create(OAuthRepository $repository): AuthorizationServer {
-		self::requireDependency();
 		$config = $repository->config;
 		$server = new AuthorizationServer($repository, $repository, $repository,
 			new CryptKey($config->secret('private_key'), null, false),
 			Key::loadFromAsciiSafeString($config->secret('encryption')));
 		$server->setDefaultScope($config->values['scope']);
-		$code = new AuthCodeGrant($repository, $repository, new \DateInterval('PT60S'));
+		$code = new AuthCodeGrant($repository, $repository, new \DateInterval(self::AUTH_CODE_TTL));
 		$code->setRefreshTokenTTL(new \DateInterval('PT' . $config->values['refresh_ttl'] . 'S'));
 		$refresh = new RefreshTokenGrant($repository);
 		$refresh->setRefreshTokenTTL(new \DateInterval('PT' . $config->values['refresh_ttl'] . 'S'));
@@ -48,14 +71,22 @@ final class ServerFactory {
 		return $server;
 	}
 
+
 	/**
-	 * Fail explicitly when the optional OAuth dependency is unavailable.
+	 * Fail with a configuration error when league/oauth2-server is not installed.
+	 *
+	 * Notes:
+	 * - Call it before the first class that implements or extends a League type is loaded.
+	 *   Loading such a class without League is a fatal error, not an exception.
 	 *
 	 * @return void
+	 * @throws McpConfigException When league/oauth2-server is not installed.
 	 */
 	public static function requireDependency(): void {
 		if (!\class_exists(AuthorizationServer::class)) {
 			throw new McpConfigException('OAuth requires league/oauth2-server ^9.4.1 in the host application.');
 		}
 	}
+
+
 }

@@ -22,20 +22,45 @@ use CitOmni\Mcp\Repository\OAuthRepository;
 use CitOmni\Mcp\Support\OAuth\Audit;
 use League\OAuth2\Server\Exception\OAuthServerException;
 
-/** ApproveAuthorization: Authorize one owner decision and consume it atomically. */
+/**
+ * ApproveAuthorization: Operation that takes the owner's decision on a pending authorization.
+ *
+ * Owns the decision whether a pending authorization is approved, denied or refused, so that a
+ * decision is checked against the browser, the CSRF value and the password in one place. The
+ * protocol work of completing the authorization belongs to the adapter's callback.
+ *
+ * Rules:
+ * - Read and change approval and rate-limit state only inside one ledger transaction.
+ * - Audit every outcome.
+ */
 final class ApproveAuthorization extends BaseOperation {
+
 	/**
-	 * Validate browser binding, CSRF and password before completing the grant.
+	 * Validate the browser binding, the CSRF value and, for an approval, the password, then complete the grant.
 	 *
-	 * The adapter callback revalidates protocol parameters and completes League's
-	 * authorization request. Protocol failures commit consumed approval state.
+	 * A decision consumes the pending approval in the same transaction that completes the
+	 * authorization, so that one approval page yields at most one decision.
 	 *
+	 * Behavior:
+	 * - invalid_request when the request ID or the cookie is malformed, the approval is unknown
+	 *   or expired, the CSRF value or the cookie does not match, or the decision is neither
+	 *   approve nor deny. A pending approval stays pending.
+	 * - rate_limited after ten password attempts per IP within 15 minutes; the attempt counts.
+	 * - invalid_password for a wrong password; the approval stays pending.
+	 * - approved or denied, with the callback's result, when the callback completes. The
+	 *   approval is consumed, and a correct password clears the IP's attempt counter.
+	 * - The OAuth error type, with the exception as result, when the callback throws
+	 *   OAuthServerException. The approval is consumed all the same.
+	 * - capacity, without a result, when the ledger is full. Nothing is saved.
+	 *
+	 * @template T
 	 * @param OAuthRepository $repository Grant repository shared with the adapter.
-	 * @param array<string, string> $form Decoded, scalar form values.
-	 * @param string|null $browser Approval cookie value.
-	 * @param string $ip Trusted client address.
-	 * @param callable(array<string, string>, bool): mixed $complete Protocol adapter.
-	 * @return array{outcome: string, result?: mixed}
+	 * @param array<string, string> $form Decoded form values.
+	 * @param string|null $browser Value of the approval cookie, or null when absent.
+	 * @param string $ip Client address resolved by the Request service.
+	 * @param callable(array<string, string>, bool): T $complete Completes the authorization with the stored parameters and whether it was approved.
+	 * @return array{outcome: string, result?: T|OAuthServerException}
+	 * @throws McpConfigException When the owner password secret is missing, empty or not a password_hash() result.
 	 */
 	public function execute(OAuthRepository $repository, #[\SensitiveParameter] array $form, #[\SensitiveParameter] ?string $browser, string $ip, callable $complete): array {
 		$id = $form['request_id'] ?? '';
@@ -100,4 +125,6 @@ final class ApproveAuthorization extends BaseOperation {
 
 		return $result;
 	}
+
+
 }

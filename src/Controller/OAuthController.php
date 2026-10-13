@@ -16,14 +16,13 @@ declare(strict_types=1);
 namespace CitOmni\Mcp\Controller;
 
 use CitOmni\Kernel\Controller\BaseController;
-use CitOmni\Mcp\Exception\OAuthCapacityException;
-use CitOmni\Mcp\Operation\OAuth\BeginAuthorization;
 use CitOmni\Mcp\Operation\OAuth\ApproveAuthorization;
+use CitOmni\Mcp\Operation\OAuth\BeginAuthorization;
 use CitOmni\Mcp\Operation\OAuth\IssueTokens;
-use CitOmni\Mcp\Support\OAuth\ConsentPage;
-use CitOmni\Mcp\Support\OAuth\Audit;
 use CitOmni\Mcp\Repository\OAuthRepository;
+use CitOmni\Mcp\Support\OAuth\Audit;
 use CitOmni\Mcp\Support\OAuth\Config;
+use CitOmni\Mcp\Support\OAuth\ConsentPage;
 use CitOmni\Mcp\Support\OAuth\ServerFactory;
 use CitOmni\Mcp\Support\OAuth\User;
 use CitOmni\Mcp\Support\Psr7Bridge;
@@ -33,38 +32,82 @@ use Nyholm\Psr7\ServerRequest;
 use Psr\Http\Message\ResponseInterface;
 
 /**
- * HTTP adapters for the optional single-owner OAuth authorization server.
+ * OAuthController: HTTP adapter for the optional single-owner OAuth authorization server.
  *
- * Uses League for authorization codes, PKCE, encrypted refresh tokens and
- * protocol errors. Consent is explicit, password-protected, CSRF-protected,
- * browser-bound and short-lived; it never starts the host's PHP session.
+ * Serves the discovery metadata, the owner approval page and the token endpoint. League handles
+ * authorization codes, PKCE, refresh tokens and protocol errors, and the OAuth Operations own
+ * admission, password decisions and atomic state transitions; this class translates between
+ * HTTP and the two.
+ *
+ * Rules:
+ * - Serve nothing while mcp.oauth.enabled is false, and nothing over another scheme, host or
+ *   port than the issuer's.
+ * - Never start the host's PHP session.
+ * - Send every response through emit(), so that each carries the no-store, CSP and framing
+ *   headers.
+ * - Decode request parameters without PHP's array and duplicate-key coercion.
  */
 final class OAuthController extends BaseController {
+
+	/** Name of the cookie that binds a pending approval to the browser that started it. */
 	private const string COOKIE = '__Host-citomni_mcp_oauth';
+
+	/** Largest query string or form body that is decoded, in bytes. */
 	private const int MAX_BODY = 16384;
+
+	/** Validated OAuth cfg of this request; null until guard() has run. */
 	private ?Config $oauthConfig = null;
 
+
 	/**
-	 * Emit the authorization server metadata for the configured issuer.
+	 * Send the authorization server metadata (RFC 8414).
 	 *
 	 * @return never
+	 * @throws \CitOmni\Mcp\Exception\McpConfigException When mcp.oauth is invalid.
 	 */
 	public function metadata(): never {
 		$config = $this->guard();
 		$this->emit($this->json($config->metadata()));
 	}
 
+
 	/**
-	 * Describe the protected MCP resource and its authorization server.
+	 * Send the protected-resource metadata of the MCP resource (RFC 9728).
 	 *
 	 * @return never
+	 * @throws \CitOmni\Mcp\Exception\McpConfigException When mcp.oauth is invalid.
 	 */
 	public function resourceMetadata(): never {
 		$config = $this->guard();
 		$this->emit($this->json($config->resourceMetadata()));
 	}
 
-	/** Validate the protocol request before showing a password or redirecting. */
+
+	/**
+	 * Show the owner's approval page, or process the owner's decision.
+	 *
+	 * Runs the owner's side of the authorization-code flow: it shows the approval page for a
+	 * valid authorization request and turns the owner's decision into League's redirect to the
+	 * client's callback.
+	 *
+	 * Behavior:
+	 * - GET: 200 with the approval page and a browser-binding cookie for a valid authorization
+	 *   request with the configured resource, an exact callback and S256 PKCE. HEAD: 200 without
+	 *   state or cookie.
+	 * - POST: a redirect to the callback with the code, or with access_denied for a denial, and
+	 *   iss; the cookie is cleared. Only a same-origin POST with the matching cookie and CSRF
+	 *   value is decided, and an approval also needs the owner's password.
+	 * - 403 for a POST from another origin, and the page again with 403 for a wrong password.
+	 * - 400 invalid_request when ApproveAuthorization refuses the decision as invalid_request.
+	 * - A protocol error gets League's error response: a redirect to the callback when the error
+	 *   carries one, such as invalid_scope or access_denied, and JSON otherwise.
+	 * - Admission failures get 429 or 503 with Retry-After.
+	 *
+	 * @return never
+	 * @throws \CitOmni\Mcp\Exception\McpConfigException When mcp.oauth is invalid, an OAuth secret is missing or empty, the owner password secret is not a password_hash() result, or league/oauth2-server is missing.
+	 * @throws \LogicException When the private-key secret is not a readable PEM key.
+	 * @throws \Defuse\Crypto\Exception\BadFormatException When the encryption secret is not a Defuse key.
+	 */
 	public function authorize(): never {
 		$config = $this->guard();
 		ServerFactory::requireDependency();
@@ -83,21 +126,21 @@ final class OAuthController extends BaseController {
 				if ($pending['outcome'] !== 'created') {
 					$this->unavailable($pending['outcome'], 60);
 				}
-				$this->emit(ConsentPage::response($config, $pending['id'], $pending['csrf'])->withHeader('Set-Cookie', self::COOKIE . '=' . $pending['browser']
-					. '; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=' . $config->values['approval_ttl']));
+				$setCookie = self::COOKIE . '=' . $pending['browser'] . '; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=' . $config->values['approval_ttl'];
+				$this->emit(ConsentPage::response($config, $pending['id'], $pending['csrf'])->withHeader('Set-Cookie', $setCookie));
 			}
 
 			$this->checkBrowserOrigin($config);
 			$form = $this->formParameters();
 			$cookie = $this->app->request->cookie(self::COOKIE);
-			$result = (new ApproveAuthorization($this->app))->execute($repository, $form, \is_string($cookie) ? $cookie : null, $this->app->request->ip(),
-				function (array $params, bool $approved) use ($server, $config): ResponseInterface {
-					$this->validateAuthorizationParameters($params, $config);
-					$auth = $server->validateAuthorizationRequest((new ServerRequest('GET', $config->issuer . '/mcp/oauth/authorize'))->withQueryParams($params));
-					$auth->setUser(new User($config->values['owner_id']));
-					$auth->setAuthorizationApproved($approved);
-					return $server->completeAuthorizationRequest($auth, new Response());
-				});
+			$complete = function (array $params, bool $approved) use ($server, $config): ResponseInterface {
+				$this->validateAuthorizationParameters($params, $config);
+				$auth = $server->validateAuthorizationRequest((new ServerRequest('GET', $config->issuer . '/mcp/oauth/authorize'))->withQueryParams($params));
+				$auth->setUser(new User($config->values['owner_id']));
+				$auth->setAuthorizationApproved($approved);
+				return $server->completeAuthorizationRequest($auth, new Response());
+			};
+			$result = (new ApproveAuthorization($this->app))->execute($repository, $form, \is_string($cookie) ? $cookie : null, $this->app->request->ip(), $complete);
 			if (\in_array($result['outcome'], ['rate_limited', 'capacity'], true)) {
 				$this->unavailable($result['outcome'], 900);
 			}
@@ -117,7 +160,25 @@ final class OAuthController extends BaseController {
 		}
 	}
 
-	/** Redeem codes and rotate refresh tokens atomically across PHP workers. */
+
+	/**
+	 * Exchange an authorization code, or rotate a refresh token.
+	 *
+	 * Redeems a grant for the client, so that each code and each refresh token is redeemed at
+	 * most once, also by parallel PHP workers.
+	 *
+	 * Behavior:
+	 * - 400 invalid_target when resource does not name the MCP resource; only a refresh may
+	 *   omit it.
+	 * - The client authenticates with HTTP Basic or with client_secret in the body, not both.
+	 * - League's token response, or its protocol error.
+	 * - A full ledger gets 503 with Retry-After.
+	 *
+	 * @return never
+	 * @throws \CitOmni\Mcp\Exception\McpConfigException When mcp.oauth is invalid, an OAuth secret is missing or empty, or league/oauth2-server is missing.
+	 * @throws \LogicException When the private-key secret is not a readable PEM key.
+	 * @throws \Defuse\Crypto\Exception\BadFormatException When the encryption secret is not a Defuse key.
+	 */
 	public function token(): never {
 		$config = $this->guard();
 		ServerFactory::requireDependency();
@@ -129,33 +190,41 @@ final class OAuthController extends BaseController {
 				$this->emit($this->json(['error' => 'invalid_target'], 400));
 			}
 			$header = $this->app->request->header('Authorization') ?: $this->app->request->server('REDIRECT_HTTP_AUTHORIZATION');
-			if (\is_string($header) && $header !== '' && isset($params['client_secret'])) {
+			$hasHeader = \is_string($header) && $header !== '';
+			if ($hasHeader && isset($params['client_secret'])) {
 				throw OAuthServerException::invalidRequest('client_secret', 'Use one client authentication method.');
 			}
-			$request = (new ServerRequest('POST', $config->issuer . '/mcp/oauth/token',
-				\is_string($header) && $header !== '' ? ['Authorization' => $header] : []))->withParsedBody($params);
+			$request = (new ServerRequest('POST', $config->issuer . '/mcp/oauth/token', $hasHeader ? ['Authorization' => $header] : []))->withParsedBody($params);
 			$repository = new OAuthRepository($this->app);
 			$server = ServerFactory::create($repository);
-			$result = (new IssueTokens($this->app))->execute($repository,
-				static fn(): ResponseInterface => $server->respondToAccessTokenRequest($request, new Response()),
-				$params['grant_type'] ?? '', $this->app->request->ip());
-			$response = $result instanceof OAuthServerException ? $result->generateHttpResponse(new Response()) : $result;
-			$this->emit($response);
-		} catch (OAuthCapacityException) {
-			Audit::record($this->app, 'token.request', 'capacity', $this->app->request->ip());
-			$this->unavailable('capacity', 60);
+			$issue = static fn(): ResponseInterface => $server->respondToAccessTokenRequest($request, new Response());
+			$result = (new IssueTokens($this->app))->execute($repository, $issue, $params['grant_type'] ?? '', $this->app->request->ip());
+			if ($result['outcome'] === 'capacity') {
+				$this->unavailable('capacity', 60);
+			}
+			$this->emit($result['result'] instanceof OAuthServerException ? $result['result']->generateHttpResponse(new Response()) : $result['result']);
 		} catch (OAuthServerException $e) {
 			$this->emit($e->generateHttpResponse(new Response()));
 		}
 	}
 
+
 	/**
-	 * Require enabled OAuth, HTTPS and the configured canonical host and port.
+	 * Require enabled OAuth, HTTPS and the issuer's host and port.
 	 *
-	 * @return Config Validated result.
+	 * Ends the request unless the OAuth server may serve it, so that every OAuth route applies
+	 * the same conditions before it reads anything.
+	 *
+	 * Behavior:
+	 * - 404 while OAuth is disabled.
+	 * - 403 for another scheme, host or port than the issuer's.
+	 * - Keeps the validated cfg for the CSP that emit() sends.
+	 *
+	 * @return Config The validated OAuth cfg.
+	 * @throws \CitOmni\Mcp\Exception\McpConfigException When mcp.oauth.enabled is not a bool, or mcp.oauth is invalid.
 	 */
 	private function guard(): Config {
-		if (!(bool)($this->app->cfg->mcp->oauth->enabled ?? false)) {
+		if (!Config::enabled($this->app)) {
 			$this->emit(new Response(404));
 		}
 
@@ -169,12 +238,14 @@ final class OAuthController extends BaseController {
 		return $config;
 	}
 
+
 	/**
 	 * Enforce the resource, exact callback and S256 PKCE policy.
 	 *
-	 * @param array $params Decoded scalar protocol parameters.
-	 * @param Config $config Validated OAuth configuration.
+	 * @param array<string, string> $params Decoded protocol parameters.
+	 * @param Config $config Validated OAuth cfg.
 	 * @return void
+	 * @throws OAuthServerException When a parameter breaks the policy.
 	 */
 	private function validateAuthorizationParameters(array $params, Config $config): void {
 		if (($params['resource'] ?? null) !== $config->resource) {
@@ -199,10 +270,15 @@ final class OAuthController extends BaseController {
 		}
 	}
 
+
 	/**
-	 * Reject explicit foreign or opaque origins before processing consent.
+	 * Reject a consent POST from a foreign or opaque origin.
 	 *
-	 * @param Config $config Validated OAuth configuration.
+	 * Behavior:
+	 * - 403 when Origin is present and is not the issuer, null included.
+	 * - 403 when Sec-Fetch-Site is present and is neither same-origin nor none.
+	 *
+	 * @param Config $config Validated OAuth cfg.
 	 * @return void
 	 */
 	private function checkBrowserOrigin(Config $config): void {
@@ -213,10 +289,19 @@ final class OAuthController extends BaseController {
 		}
 	}
 
+
 	/**
-	 * Read a bounded URL-encoded request body without PHP key coercion.
+	 * Read a URL-encoded request body without PHP's key coercion.
 	 *
-	 * @return array Validated result.
+	 * Accepts only the one content type that the OAuth endpoints define for forms, and decodes
+	 * it by the same rules as a query string.
+	 *
+	 * Behavior:
+	 * - 415 for a body of another content type.
+	 * - 413 for a body longer than MAX_BODY.
+	 *
+	 * @return array<string, string> The decoded body parameters.
+	 * @throws OAuthServerException When parameters repeat, are malformed or are too many.
 	 */
 	private function formParameters(): array {
 		$type = \strtolower(\trim(\explode(';', $this->app->request->header('Content-Type') ?? '', 2)[0]));
@@ -227,7 +312,20 @@ final class OAuthController extends BaseController {
 		return $this->parameters((new Psr7Bridge($this->app))->readBody(self::MAX_BODY));
 	}
 
-	/** Decode scalar form/query parameters without PHP's duplicate-key coercion. */
+
+	/**
+	 * Decode form or query parameters without PHP's duplicate-key coercion.
+	 *
+	 * Refuses every input that PHP would coerce, so that a parameter cannot mean one thing to
+	 * this controller and another to League.
+	 *
+	 * Behavior:
+	 * - 413 for input longer than MAX_BODY.
+	 *
+	 * @param string $raw Raw query string or URL-encoded body.
+	 * @return array<string, string> Parameters by name.
+	 * @throws OAuthServerException When a name repeats or is not 1 to 64 lowercase letters and underscores, a value holds NUL, or there are more than 32.
+	 */
 	private function parameters(#[\SensitiveParameter] string $raw): array {
 		if (\strlen($raw) > self::MAX_BODY) {
 			$this->emit($this->json(['error' => 'invalid_request'], 413));
@@ -248,7 +346,14 @@ final class OAuthController extends BaseController {
 		return $params;
 	}
 
-	/** Add issuer identification to validated success and error callbacks. */
+
+	/**
+	 * Add issuer identification (RFC 9207) to a redirect to the callback.
+	 *
+	 * @param ResponseInterface $response League's response; only a redirect is changed.
+	 * @param Config $config Validated OAuth cfg.
+	 * @return ResponseInterface The response, with iss added to its Location.
+	 */
 	private function withIssuer(ResponseInterface $response, Config $config): ResponseInterface {
 		if (!$response->hasHeader('Location')) {
 			return $response;
@@ -260,25 +365,39 @@ final class OAuthController extends BaseController {
 	}
 
 
-	/** Convert bounded admission failure into a retryable transport response. */
+	/**
+	 * Answer an admission failure with a retryable status.
+	 *
+	 * @param string $outcome rate_limited for 429; anything else gives 503.
+	 * @param int $retryAfter Seconds for Retry-After.
+	 * @return never
+	 */
 	private function unavailable(string $outcome, int $retryAfter): never {
 		$this->emit($this->json(['error' => 'temporarily_unavailable'], $outcome === 'rate_limited' ? 429 : 503)
 			->withHeader('Retry-After', (string)$retryAfter));
 	}
 
+
 	/**
-	 * Construct a JSON protocol response without transport side effects.
+	 * Build a JSON protocol response.
 	 *
-	 * @param array $data Protocol response data.
-	 * @param int $status HTTP response status.
-	 * @return ResponseInterface Validated result.
+	 * @param array<string, mixed> $data Protocol response data.
+	 * @param int $status HTTP status.
+	 * @return ResponseInterface The JSON response.
 	 */
 	private function json(array $data, int $status = 200): ResponseInterface {
 		return new Response($status, ['Content-Type' => 'application/json'], \json_encode($data, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
 	}
 
+
 	/**
-	 * Apply browser and caching policy, then emit the response.
+	 * Add the browser and caching headers, then send the response and end the script.
+	 *
+	 * Behavior:
+	 * - Adds Cache-Control no-store, Pragma no-cache, nosniff, Referrer-Policy same-origin,
+	 *   X-Frame-Options DENY and a CSP that allows inline styles only and form actions to self
+	 *   and the callback origins.
+	 * - Sends no body for HEAD.
 	 *
 	 * @param ResponseInterface $response Response to send.
 	 * @return never
@@ -294,4 +413,6 @@ final class OAuthController extends BaseController {
 		}
 		(new Psr7Bridge($this->app))->emit($response);
 	}
+
+
 }

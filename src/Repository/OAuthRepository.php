@@ -36,23 +36,45 @@ use League\OAuth2\Server\Repositories\RefreshTokenRepositoryInterface;
 use League\OAuth2\Server\Repositories\ScopeRepositoryInterface;
 
 /**
- * League's entity/persistence adapter for one configured owner and OAuth client.
+ * OAuthRepository: Repository that serves League's repository interfaces from the OAuth ledger.
  *
- * Token transitions use the same ledger transaction as the surrounding grant.
- * Consumed codes remain until expiry; a family retains only its current refresh
- * identifier and recognizes replay of every older, unexpired family token.
+ * Answers League's client, scope, code, access-token and refresh-token lookups for the one
+ * configured owner and client, and keeps the grant records in the ledger. Validating protocol
+ * parameters belongs to League and the controller. A grant family is all records that stem
+ * from one authorization code; a family keeps only its current refresh identifier, yet
+ * recognizes the replay of every older, unexpired one.
+ *
+ * Rules:
+ * - Bind every record to its grant family and to the authorization context, so that a grant
+ *   from another issuer, resource, owner, client or scope fails closed.
+ * - Treat a record that is unknown, expired, revoked or from another context as revoked.
+ * - Revoke the whole grant family when a used code or refresh token is presented again.
+ * - Store identifiers only, never a token, code, password or secret.
+ * - Change records only inside the caller's ledger transaction.
  */
 final class OAuthRepository extends BaseRepository implements AccessTokenRepositoryInterface, AuthCodeRepositoryInterface, ClientRepositoryInterface, RefreshTokenRepositoryInterface, ScopeRepositoryInterface {
+
+	/** Ledger that holds the grant records. */
 	public readonly OAuthStateRepository $state;
+
+	/** Validated OAuth cfg of this request. */
 	public readonly Config $config;
-	private ?string $family = null;
-	private string $context;
+
+	/** Set when this request revoked a grant family because a used code or refresh token was presented again. */
 	public bool $replayDetected = false;
 
+	/** Grant family of this request: the identifier of its authorization code; null until a code is issued or a record is selected. */
+	private ?string $family = null;
+
+	/** Hash of issuer, resource, owner, client and scope that every record of the current context carries. */
+	private string $context;
+
+
 	/**
-	 * Initialize request-local state from application configuration.
+	 * Load the validated OAuth cfg and the ledger, and compute the authorization context.
 	 *
 	 * @return void
+	 * @throws \CitOmni\Mcp\Exception\McpConfigException When OAuth is disabled or mcp.oauth is invalid.
 	 */
 	protected function init(): void {
 		$this->config = new Config($this->app);
@@ -64,19 +86,27 @@ final class OAuthRepository extends BaseRepository implements AccessTokenReposit
 		], JSON_THROW_ON_ERROR));
 	}
 
-	/** {@inheritDoc} */
-	public function getClientEntity(string $clientIdentifier): ?ClientEntityInterface {
-		$v = $this->config->values;
-		return $clientIdentifier === $v['client_id'] ? new Client($v['client_id'], $v['client_name'], $v['redirect_uris']) : null;
-	}
 
 	/**
-	 * Authenticate the registered confidential client for a supported grant.
+	 * Return the configured client.
 	 *
-	 * @param string $clientIdentifier Configured client identifier.
-	 * @param string|null $clientSecret Presented client secret, excluded from exception arguments.
-	 * @param string|null $grantType Requested OAuth grant type.
-	 * @return bool Validated result.
+	 * @param string $clientIdentifier Client ID from the request.
+	 * @return ClientEntityInterface|null The configured client, or null for any other client ID.
+	 */
+	public function getClientEntity(string $clientIdentifier): ?ClientEntityInterface {
+		$values = $this->config->values;
+		return $clientIdentifier === $values['client_id'] ? new Client($values['client_id'], $values['client_name'], $values['redirect_uris']) : null;
+	}
+
+
+	/**
+	 * Authenticate the configured confidential client for a supported grant.
+	 *
+	 * @param string $clientIdentifier Client ID from the request.
+	 * @param string|null $clientSecret Presented client secret.
+	 * @param string|null $grantType Requested grant type.
+	 * @return bool True when the configured client presented its secret for the authorization-code or refresh-token grant.
+	 * @throws \CitOmni\Mcp\Exception\McpConfigException When the client secret is missing or empty in the secrets store.
 	 */
 	public function validateClient(string $clientIdentifier, #[\SensitiveParameter] ?string $clientSecret, ?string $grantType): bool {
 		return $clientIdentifier === $this->config->values['client_id'] && $clientSecret !== null
@@ -84,20 +114,28 @@ final class OAuthRepository extends BaseRepository implements AccessTokenReposit
 			&& \hash_equals($this->config->secret('client'), $clientSecret);
 	}
 
-	/** {@inheritDoc} */
+
+	/**
+	 * Return the configured scope.
+	 *
+	 * @param string $identifier Scope from the request.
+	 * @return ScopeEntityInterface|null The configured scope, or null for any other scope.
+	 */
 	public function getScopeEntityByIdentifier(string $identifier): ?ScopeEntityInterface {
 		return $identifier === $this->config->values['scope'] ? new Scope($identifier) : null;
 	}
 
+
 	/**
 	 * Require the configured owner, client and single scope on every grant.
 	 *
-	 * @param array $scopes Requested scope entities.
-	 * @param string $grantType Requested OAuth grant type.
-	 * @param ClientEntityInterface $clientEntity Authenticated client entity.
+	 * @param ScopeEntityInterface[] $scopes Requested scope entities.
+	 * @param string $grantType Requested grant type.
+	 * @param ClientEntityInterface $clientEntity Authenticated client.
 	 * @param string|null $userIdentifier Resource owner identifier.
-	 * @param string|null $authCodeId Authorization code identifier when supplied by League.
-	 * @return array Validated result.
+	 * @param string|null $authCodeId Authorization code identifier, when League passes one.
+	 * @return ScopeEntityInterface[] The requested scopes, unchanged.
+	 * @throws OAuthServerException When the owner, client or scope is not the configured one.
 	 */
 	public function finalizeScopes(array $scopes, string $grantType, ClientEntityInterface $clientEntity, ?string $userIdentifier = null, ?string $authCodeId = null): array {
 		if ($userIdentifier !== $this->config->values['owner_id'] || $clientEntity->getIdentifier() !== $this->config->values['client_id']) {
@@ -111,7 +149,15 @@ final class OAuthRepository extends BaseRepository implements AccessTokenReposit
 		return $scopes;
 	}
 
-	/** {@inheritDoc} */
+
+	/**
+	 * Create an access token bound to the issuer and the MCP resource.
+	 *
+	 * @param ClientEntityInterface $clientEntity Client the token is issued to.
+	 * @param ScopeEntityInterface[] $scopes Granted scopes.
+	 * @param string|null $userIdentifier Resource owner identifier.
+	 * @return AccessTokenEntityInterface The unsaved token.
+	 */
 	public function getNewToken(ClientEntityInterface $clientEntity, array $scopes, ?string $userIdentifier = null): AccessTokenEntityInterface {
 		$token = new AccessToken($this->config->issuer, $this->config->resource);
 		$token->setClient($clientEntity);
@@ -123,45 +169,117 @@ final class OAuthRepository extends BaseRepository implements AccessTokenReposit
 		return $token;
 	}
 
-	/** {@inheritDoc} */
+
+	/**
+	 * Record a new access token in the current grant family.
+	 *
+	 * Stores the token's identifier and expiry with the family and the authorization context,
+	 * so that the token is revoked with its family and fails closed in another context.
+	 *
+	 * @param AccessTokenEntityInterface $accessTokenEntity Token to record.
+	 * @return void
+	 * @throws UniqueTokenIdentifierConstraintViolationException When the identifier exists; League retries with a new one.
+	 * @throws \LogicException When no grant family is selected or no transaction is open.
+	 * @throws \CitOmni\Mcp\Exception\OAuthCapacityException When the ledger has no room for a new grant record.
+	 */
 	public function persistNewAccessToken(AccessTokenEntityInterface $accessTokenEntity): void {
 		$this->persist('access', $accessTokenEntity->getIdentifier(), $accessTokenEntity->getExpiryDateTime()->getTimestamp());
 	}
 
-	/** {@inheritDoc} */
+
+	/**
+	 * Revoke an access token by deleting its record.
+	 *
+	 * A token without a record counts as revoked, so deleting the record revokes the token and
+	 * keeps the ledger small.
+	 *
+	 * @param string $tokenId Token identifier.
+	 * @return void
+	 * @throws \LogicException When no transaction is open.
+	 */
 	public function revokeAccessToken(string $tokenId): void {
-		// Unknown access tokens already fail closed; no access tombstone is needed.
 		$this->state->delete('access:' . $tokenId);
 	}
 
-	/** {@inheritDoc} */
+
+	/**
+	 * Tell whether an access token is revoked.
+	 *
+	 * @param string $tokenId Token identifier.
+	 * @return bool True when the record is missing, expired, revoked or from another authorization context.
+	 */
 	public function isAccessTokenRevoked(string $tokenId): bool {
 		$record = $this->state->get('access:' . $tokenId);
 		return $record === null || ($record['revoked'] ?? true) !== false || ($record['context'] ?? null) !== $this->context;
 	}
 
-	/** {@inheritDoc} */
+
+	/**
+	 * Create an authorization code.
+	 *
+	 * @return AuthCodeEntityInterface The unsaved code.
+	 */
 	public function getNewAuthCode(): AuthCodeEntityInterface {
 		return new AuthCode();
 	}
 
-	/** {@inheritDoc} */
+
+	/**
+	 * Record a new authorization code and start its grant family.
+	 *
+	 * Every token later issued from the code carries the code's identifier as its family, so
+	 * that a replay of the code can revoke them all.
+	 *
+	 * @param AuthCodeEntityInterface $authCodeEntity Code to record; its identifier becomes the family.
+	 * @return void
+	 * @throws UniqueTokenIdentifierConstraintViolationException When the identifier exists; League retries with a new one.
+	 * @throws \LogicException When no transaction is open.
+	 * @throws \CitOmni\Mcp\Exception\OAuthCapacityException When the ledger has no room for a new grant record.
+	 */
 	public function persistNewAuthCode(AuthCodeEntityInterface $authCodeEntity): void {
 		$this->family = $authCodeEntity->getIdentifier();
 		$this->persist('code', $authCodeEntity->getIdentifier(), $authCodeEntity->getExpiryDateTime()->getTimestamp());
 	}
 
-	/** {@inheritDoc} */
+
+	/**
+	 * Mark an authorization code as used.
+	 *
+	 * Keeps the record until it expires, so that a replay of the code is recognized.
+	 *
+	 * @param string $codeId Code identifier.
+	 * @return void
+	 * @throws \LogicException When no transaction is open.
+	 */
 	public function revokeAuthCode(string $codeId): void {
 		$this->revoke('code', $codeId);
 	}
 
-	/** {@inheritDoc} */
+
+	/**
+	 * Tell whether an authorization code is revoked, and select its grant family.
+	 *
+	 * Selecting the family lets the tokens issued from the code join it.
+	 *
+	 * Behavior:
+	 * - True when the record is unknown or from another authorization context.
+	 * - True when the code was used before; the whole grant family is then revoked.
+	 *
+	 * @param string $codeId Code identifier.
+	 * @return bool False only for an unused code of the current context.
+	 * @throws \LogicException When a revocation is needed and no transaction is open.
+	 */
 	public function isAuthCodeRevoked(string $codeId): bool {
 		return $this->selectGrant('code', $codeId);
 	}
 
-	/** {@inheritDoc} */
+
+	/**
+	 * Create a refresh token in the current grant family.
+	 *
+	 * @return RefreshTokenEntityInterface|null The unsaved token.
+	 * @throws \LogicException When no grant family is selected.
+	 */
 	public function getNewRefreshToken(): ?RefreshTokenEntityInterface {
 		if ($this->family === null) {
 			throw new \LogicException('No OAuth grant family was selected.');
@@ -170,11 +288,18 @@ final class OAuthRepository extends BaseRepository implements AccessTokenReposit
 		return new RefreshToken($this->family);
 	}
 
+
 	/**
-	 * Replace the family's current refresh record without accumulating tombstones.
+	 * Record a refresh token as its family's current one.
 	 *
-	 * @param RefreshTokenEntityInterface $refreshTokenEntity New refresh token entity.
+	 * Replaces the family's previous refresh record rather than keeping a tombstone per
+	 * rotation, and renews the family's expiry to the new token's.
+	 *
+	 * @param RefreshTokenEntityInterface $refreshTokenEntity Token to record.
 	 * @return void
+	 * @throws UniqueTokenIdentifierConstraintViolationException When the identifier exists; League retries with a new one.
+	 * @throws \LogicException When no grant family is selected or no transaction is open.
+	 * @throws \CitOmni\Mcp\Exception\OAuthCapacityException When the ledger has no room for a new grant record.
 	 */
 	public function persistNewRefreshToken(RefreshTokenEntityInterface $refreshTokenEntity): void {
 		$familyKey = 'family:' . $this->family;
@@ -193,19 +318,40 @@ final class OAuthRepository extends BaseRepository implements AccessTokenReposit
 		]);
 	}
 
-	/** {@inheritDoc} */
+
+	/**
+	 * Mark a refresh token as used.
+	 *
+	 * The mark lasts until the family's next refresh token replaces the record.
+	 *
+	 * @param string $tokenId Token identifier.
+	 * @return void
+	 * @throws \LogicException When no transaction is open.
+	 */
 	public function revokeRefreshToken(string $tokenId): void {
 		$this->revoke('refresh', $tokenId);
 	}
 
+
 	/**
-	 * Recognize old family identifiers and revoke descendants on replay.
+	 * Tell whether a refresh token is revoked, and select its grant family.
 	 *
-	 * @param string $tokenId Refresh token identifier decrypted and expiry-checked by League.
-	 * @return bool Validated result.
+	 * Comparing the token with its family's current identifier recognizes the replay of any
+	 * older one, although only the current identifier is kept. Selecting the family lets the
+	 * new tokens join it.
+	 *
+	 * Behavior:
+	 * - True when the identifier is malformed, or its family is unknown, revoked or from another
+	 *   authorization context.
+	 * - True when it is not its family's current token; the whole family is then revoked.
+	 * - Otherwise as for an authorization code: true when the record is unknown, from another
+	 *   context or used, and a used record revokes the family.
+	 *
+	 * @param string $tokenId Refresh token identifier, decrypted and expiry-checked by League.
+	 * @return bool False only for the current, unused refresh token of a live family.
+	 * @throws \LogicException When a revocation is needed and no transaction is open.
 	 */
 	public function isRefreshTokenRevoked(string $tokenId): bool {
-		// League has already authenticated/decrypted this identifier and checked expiry.
 		if (\preg_match('/^([a-f0-9]{80})\.[a-f0-9]{80}$/D', $tokenId, $match) !== 1) {
 			return true;
 		}
@@ -224,13 +370,17 @@ final class OAuthRepository extends BaseRepository implements AccessTokenReposit
 		return $this->selectGrant('refresh', $tokenId);
 	}
 
+
 	/**
-	 * Insert one token record bound to the current family and authorization context.
+	 * Insert one record bound to the current grant family and authorization context.
 	 *
-	 * @param string $kind Token record kind.
-	 * @param string $id Server-generated token or family identifier.
+	 * @param string $kind Record kind: access, code or refresh.
+	 * @param string $id Server-generated identifier.
 	 * @param int $expires Unix expiry time.
 	 * @return void
+	 * @throws UniqueTokenIdentifierConstraintViolationException When the identifier exists; League retries with a new one.
+	 * @throws \LogicException When no grant family is selected or no transaction is open.
+	 * @throws \CitOmni\Mcp\Exception\OAuthCapacityException When the ledger has no room for a new grant record.
 	 */
 	private function persist(string $kind, string $id, int $expires): void {
 		if ($this->state->get($kind . ':' . $id) !== null) {
@@ -244,12 +394,14 @@ final class OAuthRepository extends BaseRepository implements AccessTokenReposit
 		$this->state->put($kind . ':' . $id, ['expires' => $expires, 'family' => $this->family, 'revoked' => false, 'context' => $this->context]);
 	}
 
+
 	/**
 	 * Mark an existing record revoked without extending its lifetime.
 	 *
-	 * @param string $kind Token record kind.
-	 * @param string $id Server-generated token or family identifier.
+	 * @param string $kind Record kind: code or refresh.
+	 * @param string $id Record identifier.
 	 * @return void
+	 * @throws \LogicException When no transaction is open.
 	 */
 	private function revoke(string $kind, string $id): void {
 		$record = $this->state->get($kind . ':' . $id);
@@ -259,7 +411,15 @@ final class OAuthRepository extends BaseRepository implements AccessTokenReposit
 		}
 	}
 
-	/** Select a grant family, or invalidate its descendants on replay. */
+
+	/**
+	 * Select the grant family of a code or refresh record, and revoke the family on replay.
+	 *
+	 * @param string $kind Record kind: code or refresh.
+	 * @param string $id Record identifier.
+	 * @return bool True when the record is unknown, from another context or already revoked; a revoked record revokes its whole family.
+	 * @throws \LogicException When a revocation is needed and no transaction is open.
+	 */
 	private function selectGrant(string $kind, string $id): bool {
 		$record = $this->state->get($kind . ':' . $id);
 		if ($record === null || ($record['context'] ?? null) !== $this->context) {
@@ -275,4 +435,6 @@ final class OAuthRepository extends BaseRepository implements AccessTokenReposit
 
 		return false;
 	}
+
+
 }

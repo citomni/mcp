@@ -19,17 +19,22 @@ use League\OAuth2\Server\Entities\ScopeEntityInterface;
 use League\OAuth2\Server\Entities\Traits\EntityTrait;
 use League\OAuth2\Server\Entities\Traits\ScopeTrait;
 
-/** The host's explicitly configured MCP permission. */
+/**
+ * Scope: League entity for the one configured OAuth scope.
+ */
 final class Scope implements ScopeEntityInterface {
 	use EntityTrait;
 	use ScopeTrait;
 
+
 	/**
-	 * Retain the explicit dependencies and immutable entity values.
+	 * Describe the configured scope.
 	 *
-	 * @param string $id Server-generated token or family identifier.
+	 * @param string $id Scope identifier.
 	 */
 	public function __construct(string $id) {
 		$this->identifier = $id;
 	}
+
+
 }

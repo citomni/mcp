@@ -18,17 +18,14 @@ namespace CitOmni\Mcp\Tool;
 use Mcp\Server\ClientGateway;
 
 /**
- * Ping: Answer "pong" with the server time, to check the endpoint end to end.
+ * Ping: MCP tool that answers "pong" and the server time, to check the endpoint end to end.
  *
- * Registered in the package baseline as mcp.tools.ping. A successful call proves
- * that the client reaches the endpoint, that its token is accepted, and that the
- * SDK dispatches tool calls. Remove it with 'ping' => null in the app's mcp.tools.
- *
- * Typical usage:
- *   tools/call {"name": "ping", "arguments": {}}  ->  "pong 2026-10-10T08:52:00Z"
+ * A successful call proves that the client reaches the endpoint, that its credentials are
+ * accepted and that tool calls are dispatched. It reads nothing and changes nothing.
  */
 final class Ping extends BaseTool {
 
+	/** MCP definition of the tool: no arguments, read-only, no external systems. */
 	public const array DEFINITION = [
 		'title'       => 'Ping',
 		'description' => 'Check that this MCP server is reachable. Returns "pong" and the server time in UTC.',
@@ -49,10 +46,11 @@ final class Ping extends BaseTool {
 	 *
 	 * @param array<string, mixed> $arguments None expected.
 	 * @param ClientGateway $gateway Unused.
-	 * @return string "pong" followed by an ISO 8601 UTC timestamp.
+	 * @return string "pong" followed by an ISO 8601 UTC timestamp, such as "pong 2026-10-10T08:52:00Z".
 	 */
 	public function execute(array $arguments, ClientGateway $gateway): string {
 		return 'pong ' . \gmdate('Y-m-d\TH:i:s\Z');
 	}
+
 
 }

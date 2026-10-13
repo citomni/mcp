@@ -19,8 +19,8 @@ namespace CitOmni\Mcp\Tests;
  * Run every suite under tests/, each in its own PHP process: first the isolated
  * suites (tests/<suite>/run.php), then the database suites (tests/<suite>/database.php).
  *
- * Suites replace framework classes with class_alias doubles and install their
- * own error handlers, so they never share a process. Each suite's output is
+ * Suites define constants and install their own error handlers, so they never
+ * share a process. Each suite's output is
  * passed through unchanged under a "== <suite>/<script>" heading, which is also
  * the path for running that suite alone. The last line, under "== total", adds
  * up the suites' totals.

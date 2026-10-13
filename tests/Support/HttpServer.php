@@ -16,22 +16,18 @@ declare(strict_types=1);
 namespace CitOmni\Mcp\Tests\Support;
 
 /**
- * PHP's built-in web server running a CitOmni app, for end-to-end MCP requests.
+ * HttpServer: PHP's built-in web server running a CitOmni app, for end-to-end tests.
  *
- * Behavior:
- * - start() serves the app's public/ on 127.0.0.1 and a free port, with
- *   public/index.php as router, and waits until the port accepts connections.
- *   It returns null when the server cannot run here; $lastFailure says why.
- * - request() sends one raw HTTP/1.1 request and returns status, headers
- *   (lowercased names), and body. A chunked body is decoded.
- * - stop() terminates the process and is idempotent. start() also registers it
- *   as a shutdown function.
+ * Gives a suite a real kernel to send raw HTTP requests to, without a web server installation.
+ * Every request is a fresh PHP request in the server process, so nothing but files survives
+ * between requests, as under PHP-FPM. What the app answers is left to the app and the cfg the
+ * suite writes for it.
  *
- * Notes:
- * - The server runs with the same PHP binary and php.ini as the suite. Only the
- *   -d settings given to start() are added.
- * - Every request is a fresh PHP request in the server process, so nothing but
- *   files survives between requests, as under PHP-FPM.
+ * Rules:
+ * - Listen on 127.0.0.1 only.
+ * - Start every PHP process with the PHP binary and php.ini of the running suite, adding only
+ *   the INI settings a caller passes.
+ * - Leave no process running when the suite ends.
  */
 final class HttpServer {
 
@@ -43,6 +39,8 @@ final class HttpServer {
 
 
 	/**
+	 * Wrap a started server process.
+	 *
 	 * @param resource $process Server process.
 	 * @param int $port Port on 127.0.0.1.
 	 * @param string $log File that receives the server's output.
@@ -54,6 +52,13 @@ final class HttpServer {
 
 	/**
 	 * Start the server for an app.
+	 *
+	 * Behavior:
+	 * - Serves public/ below the app root on a free port, with public/index.php as router, and
+	 *   returns once the port accepts connections.
+	 * - Tries up to three ports. Returns null when none works; $lastFailure then says why.
+	 * - Appends the server's output to server.log in the app root.
+	 * - Registers stop() as a shutdown function.
 	 *
 	 * @param string $appDir App root with public/index.php.
 	 * @param array<string, string> $ini INI settings, passed with -d.
@@ -73,15 +78,7 @@ final class HttpServer {
 				return null;
 			}
 
-			$command = match (true) {
-				\php_ini_loaded_file() !== false   => [\PHP_BINARY, '-c', \php_ini_loaded_file()],
-				\php_ini_scanned_files() !== false => [\PHP_BINARY],
-				default                            => [\PHP_BINARY, '-n'],
-			};
-			foreach ($ini as $name => $value) {
-				\array_push($command, '-d', $name . '=' . $value);
-			}
-
+			$command = self::phpCommand($ini);
 			\array_push($command, '-S', '127.0.0.1:' . $port, '-t', $public, $public . '/index.php');
 
 			$process = @\proc_open($command, [0 => ['pipe', 'r'], 1 => ['file', $log, 'a'], 2 => ['file', $log, 'a']], $pipes);
@@ -111,6 +108,12 @@ final class HttpServer {
 
 	/**
 	 * Send one request.
+	 *
+	 * Behavior:
+	 * - Sends Content-Length and Connection: close, and reads the response until the server
+	 *   closes the connection.
+	 * - Returns header names lowercased; repeated headers are joined with ", ".
+	 * - Decodes a chunked body.
 	 *
 	 * @param string $method HTTP method.
 	 * @param string $path Path and query.
@@ -150,6 +153,32 @@ final class HttpServer {
 		}
 
 		return ['status' => (int)$m[1], 'headers' => $responseHeaders, 'body' => $responseBody];
+	}
+
+
+	/**
+	 * Build the command that starts PHP like the running suite.
+	 *
+	 * Behavior:
+	 * - Uses the same PHP binary and php.ini as this process: the loaded file, the default
+	 *   lookup, or none (-n) when this process runs without one.
+	 * - Adds each INI setting as a -d option.
+	 *
+	 * @param array<string, string> $ini INI settings.
+	 * @return list<string> Binary and options; the caller appends the script and its arguments.
+	 */
+	public static function phpCommand(array $ini = []): array {
+		$command = match (true) {
+			\php_ini_loaded_file() !== false   => [\PHP_BINARY, '-c', \php_ini_loaded_file()],
+			\php_ini_scanned_files() !== false => [\PHP_BINARY],
+			default                            => [\PHP_BINARY, '-n'],
+		};
+
+		foreach ($ini as $name => $value) {
+			\array_push($command, '-d', $name . '=' . $value);
+		}
+
+		return $command;
 	}
 
 

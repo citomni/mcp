@@ -18,6 +18,7 @@ namespace CitOmni\Mcp\Support;
 use CitOmni\Kernel\App;
 use CitOmni\Kernel\Cfg;
 use CitOmni\Mcp\Exception\McpConfigException;
+use CitOmni\Mcp\Support\OAuth\ToolDefinition;
 use CitOmni\Mcp\Tool\BaseTool;
 use Mcp\Exception\InvalidArgumentException as SdkInvalidArgumentException;
 use Mcp\Schema\ServerCapabilities;
@@ -33,35 +34,28 @@ use Psr\Http\Message\StreamFactoryInterface;
 use Psr\Log\LoggerInterface;
 
 /**
- * ServerFactory: Build the MCP SDK server and its HTTP transport from cfg mcp.
+ * ServerFactory: Support class that builds the MCP SDK server and its HTTP transport from cfg mcp.
  *
- * Behavior:
- * - server() configures the SDK builder from mcp.server, mcp.session, mcp.cache,
- *   and mcp.tools, and builds a server that answers both protocol eras:
- *   1) Handshake era (initialize, 2024-11-05 ... 2025-11-25) with file sessions
- *   2) Stateless 2026-07-28 with caching hints for tools/list and server/discover
- * - Advertises the tools capability only. The SDK would also advertise logging
- *   and completions, which this package does not offer.
- * - Each mcp.tools entry is registered with Builder::add(): the definition from
- *   the class's DEFINITION constant, named by the cfg key, and the handler
- *   constructed as new $class($app, $client). Null entries are skipped.
- * - transport() wraps the request in the SDK's Streamable HTTP transport with
- *   DNS rebinding protection only. The router already answers OPTIONS, and the
- *   SDK's CORS middleware adds nothing a server-to-server client needs.
+ * Keeps the SDK wiring in one place, so that every request gets a server with the same identity,
+ * capabilities, session store, caching hints and tools. Both are built per request.
  *
- * Notes:
- * - Everything is built per request. The SDK keeps no state between requests
- *   except the session files.
- * - The allowed hosts are mcp.http.allowed_hosts plus the host of
- *   CITOMNI_PUBLIC_ROOT_URL, which the HTTP Kernel defines from http.base_url.
+ * Rules:
+ * - Advertise only the capability the package offers: tools.
+ * - Name each tool by its mcp.tools key, and take everything else from the class's DEFINITION.
+ * - Fail with McpConfigException, naming the cfg key or the tool, for invalid cfg.
  *
  * Typical usage:
  *   $factory   = new ServerFactory($this->app);
  *   $transport = $factory->transport($request, $psr17Factory, $logger);
- *   $response  = $factory->server($logger, $client)->run($transport);
+ *   $response  = $factory->server($logger, $client, $oauth)->run($transport);
  */
 final class ServerFactory {
 
+	/**
+	 * Create the factory for the app whose cfg mcp describes the server.
+	 *
+	 * @param App $app App whose cfg holds mcp.
+	 */
 	public function __construct(private readonly App $app) {
 	}
 
@@ -69,8 +63,16 @@ final class ServerFactory {
 	/**
 	 * Build the MCP server with every configured tool.
 	 *
+	 * Behavior:
+	 * - The server answers both protocol eras: the initialize handshake with file sessions and
+	 *   the stateless 2026-07-28 lifecycle with caching hints for tools/list and server/discover.
+	 * - Registers each mcp.tools entry, skipping null ones, with its handler constructed as
+	 *   new $class($app, $client).
+	 * - For a request that OAuth authenticated, each definition carries securitySchemes with
+	 *   mcp.oauth.scope.
+	 *
 	 * @param LoggerInterface $logger Logger for the SDK.
-	 * @param string|null $client Stable authenticated identity; null when authentication is disabled.
+	 * @param string|null $client Authenticated identity; null when authentication is disabled.
 	 * @param bool $oauth Whether OAuth authenticated this request.
 	 * @return Server Server ready for run().
 	 * @throws McpConfigException When mcp.tools is invalid or a tool definition is rejected.
@@ -87,6 +89,7 @@ final class ServerFactory {
 				title: self::optionalString($cfg->server->title),
 			)
 			->setInstructions(self::optionalString($cfg->server->instructions))
+			// Explicit, so that no capability the package does not offer, such as logging, is advertised.
 			->setCapabilities(new ServerCapabilities(tools: true, resources: false, prompts: false))
 			->setSession(new FileSessionStore((string)$cfg->session->dir, (int)$cfg->session->ttl))
 			->setCachePolicy(CachePolicy::none()
@@ -94,12 +97,11 @@ final class ServerFactory {
 				->withMethod('server/discover', $ttlMs))
 			->setLogger($logger);
 
-		$oauthScope = $oauth && (bool)($cfg->oauth->enabled ?? false)
-			? (string)$cfg->oauth->scope : null;
+		$oauthScope = $oauth ? (string)$cfg->oauth->scope : null;
 		foreach ($this->tools() as $name => $class) {
 			$definition = $this->definition($name, $class);
 			if ($oauthScope !== null) {
-				$definition = new \CitOmni\Mcp\Support\OAuth\ToolDefinition($definition, $oauthScope);
+				$definition = new ToolDefinition($definition, $oauthScope);
 			}
 			$builder->add($definition, new $class($this->app, $client));
 		}
@@ -111,10 +113,16 @@ final class ServerFactory {
 	/**
 	 * Wrap a PSR-7 request in the SDK's Streamable HTTP transport.
 	 *
+	 * Behavior:
+	 * - DNS rebinding protection is the only middleware. It accepts the hosts in
+	 *   mcp.http.allowed_hosts and the host of CITOMNI_PUBLIC_ROOT_URL.
+	 * - mcp.http.max_body_bytes is the transport's body limit.
+	 *
 	 * @param ServerRequestInterface $request The MCP request.
 	 * @param ResponseFactoryInterface&StreamFactoryInterface $factory PSR-17 factory for responses and bodies.
 	 * @param LoggerInterface $logger Logger for the SDK.
 	 * @return StreamableHttpTransport Transport for Server::run().
+	 * @throws McpConfigException When mcp.http.allowed_hosts is not a list of non-empty strings.
 	 */
 	public function transport(ServerRequestInterface $request, ResponseFactoryInterface&StreamFactoryInterface $factory, LoggerInterface $logger): StreamableHttpTransport {
 		return new StreamableHttpTransport(
@@ -167,7 +175,7 @@ final class ServerFactory {
 	/**
 	 * Build the SDK tool definition from the class's DEFINITION.
 	 *
-	 * @param string $name Tool name (the mcp.tools key).
+	 * @param string $name Tool name: the mcp.tools key.
 	 * @param class-string<BaseTool> $class Tool class.
 	 * @return Tool SDK tool definition.
 	 * @throws McpConfigException When DEFINITION contains "name" or the SDK rejects it.
@@ -190,10 +198,10 @@ final class ServerFactory {
 
 
 	/**
-	 * Hosts accepted by the DNS rebinding check.
+	 * List the hosts that the DNS rebinding check accepts.
 	 *
-	 * @return list<string> Host names without port.
-	 * @throws McpConfigException When mcp.http.allowed_hosts is not a list of strings.
+	 * @return list<string> mcp.http.allowed_hosts and the host of CITOMNI_PUBLIC_ROOT_URL when it is defined, without port and without duplicates.
+	 * @throws McpConfigException When mcp.http.allowed_hosts is not a list of non-empty strings.
 	 */
 	private function allowedHosts(): array {
 		$hosts = $this->app->cfg->mcp->http->allowed_hosts;
@@ -230,5 +238,6 @@ final class ServerFactory {
 	private static function optionalString(mixed $value): ?string {
 		return $value === null || $value === '' ? null : (string)$value;
 	}
+
 
 }

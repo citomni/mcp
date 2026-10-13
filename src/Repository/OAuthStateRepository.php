@@ -19,37 +19,65 @@ use CitOmni\Kernel\Repository\BaseRepository;
 use CitOmni\Mcp\Exception\OAuthCapacityException;
 
 /**
- * Small single-host OAuth ledger with atomic replacement and a stable lock file.
+ * OAuthStateRepository: Repository for the OAuth ledger, a JSON file next to a stable lock file.
  *
- * Behavior:
- * - A transaction serializes code redemption, refresh rotation and consent.
- * - Failed callbacks leave the previous ledger intact.
- * - Unknown, deleted or expired records fail closed.
- * - No bearer token, password, private key or client secret is stored here.
+ * Holds the approval, rate-limit and grant records of one owner on one PHP host. It serializes
+ * state transitions between PHP workers with an exclusive file lock and replaces the ledger
+ * atomically. What a record means belongs to its callers. The ledger is not a distributed
+ * token store.
  *
- * Notes:
- * - Intended for one owner on one PHP host, not a distributed token store.
- * - Files must live outside the webroot and survive deployments.
+ * Rules:
+ * - Change records only inside transaction(); a failed transition leaves the previous ledger.
+ * - Treat a missing or expired record as absent.
+ * - Never evict a live record to make room; refuse a new one with OAuthCapacityException.
+ * - Keep the files outside the public directory, and never delete the lock file.
  */
 final class OAuthStateRepository extends BaseRepository {
+
+	/** Directory of ledger.json and oauth.lock. */
 	private string $dir;
+
+	/** @var array<string, array<string, mixed>>|null Records of the open transaction by key; null outside a transaction. */
 	private ?array $records = null;
+
+	/** Whether the open transaction changed or dropped a record. */
 	private bool $dirty = false;
+
+	/** Whether the open transaction changed only approval and rate-limit records, which have a lower size limit. */
 	private bool $admissionOnly = true;
 
+
 	/**
-	 * Initialize request-local state from application configuration.
+	 * Read the ledger directory from cfg.
 	 *
 	 * @return void
 	 */
 	protected function init(): void {
-		$this->dir = \rtrim((string)$this->app->cfg->mcp->oauth->state_dir, '/\\');
-		if ($this->dir === '') {
-			throw new \RuntimeException('Empty OAuth state directory.');
-		}
+		// Assumes that Config validated state_dir as a non-empty string. The directory checks use
+		// it as configured: trimming its separators would turn / into '' and C:\ into C:, which
+		// they would not read as a root.
+		$this->dir = (string)$this->app->cfg->mcp->oauth->state_dir;
 	}
 
-	/** Execute a complete transition under one exclusive lock. */
+
+	/**
+	 * Run one state transition under the exclusive ledger lock.
+	 *
+	 * Serializes every state change between the PHP workers of the host, so that a transition
+	 * sees the records that the previous one saved.
+	 *
+	 * Behavior:
+	 * - Loads the ledger and drops expired records first.
+	 * - Saves the ledger when anything changed, the dropped records included. An exception from
+	 *   the action leaves the previous ledger in place.
+	 *
+	 * @param callable(): mixed $action Transition that reads and writes through this repository.
+	 * @return mixed The action's result.
+	 * @throws \LogicException When a transaction is already open.
+	 * @throws \RuntimeException When the ledger cannot be locked, read or written, or its directory lies inside the public directory.
+	 * @throws \JsonException When the ledger is not valid JSON.
+	 * @throws OAuthCapacityException When the saved ledger would exceed its size limit.
+	 */
 	public function transaction(callable $action): mixed {
 		if ($this->records !== null) {
 			throw new \LogicException('Nested OAuth state transactions are not supported.');
@@ -79,7 +107,15 @@ final class OAuthStateRepository extends BaseRepository {
 		}
 	}
 
-	/** Read within the transaction or under a separate shared lock. */
+
+	/**
+	 * Read one record, inside the open transaction or under a shared lock.
+	 *
+	 * @param string $key Record key, such as "family:<id>".
+	 * @return array<string, mixed>|null The record, or null when it is missing or expired.
+	 * @throws \RuntimeException When the ledger cannot be locked or read outside a transaction, or its directory lies inside the public directory.
+	 * @throws \JsonException When the ledger read outside a transaction is not valid JSON.
+	 */
 	public function get(string $key): ?array {
 		if ($this->records !== null) {
 			$record = $this->records[$key] ?? null;
@@ -96,7 +132,25 @@ final class OAuthStateRepository extends BaseRepository {
 		return \is_array($record) && ($record['expires'] ?? 0) > \time() ? $record : null;
 	}
 
-	/** Writes require an explicit transaction owned by the caller. */
+
+	/**
+	 * Insert or replace one record inside the caller's transaction.
+	 *
+	 * The admission limits keep records that anyone can create from crowding out grants. The
+	 * transaction saves the change.
+	 *
+	 * Behavior:
+	 * - A new approval or rate-limit record is admitted only while the ledger holds fewer than
+	 *   2,048 records, which keeps room for grant records. Any new record is admitted only while
+	 *   it holds fewer than 4,096.
+	 * - Replacing an existing record is always admitted.
+	 *
+	 * @param string $key Record key.
+	 * @param array<string, mixed> $record Record with an integer expires.
+	 * @return void
+	 * @throws \LogicException When no transaction is open.
+	 * @throws OAuthCapacityException When the ledger is full for this kind of record.
+	 */
 	public function put(string $key, array $record): void {
 		$this->assertTransaction();
 		// Public approval/rate records cannot consume the capacity reserved for grants.
@@ -112,11 +166,15 @@ final class OAuthStateRepository extends BaseRepository {
 		}
 	}
 
+
 	/**
-	 * Remove one record inside the caller-owned transaction.
+	 * Remove one record inside the caller's transaction.
 	 *
-	 * @param string $key State record key.
+	 * The transaction saves the change; removing a missing record is no error.
+	 *
+	 * @param string $key Record key.
 	 * @return void
+	 * @throws \LogicException When no transaction is open.
 	 */
 	public function delete(string $key): void {
 		$this->assertTransaction();
@@ -127,7 +185,17 @@ final class OAuthStateRepository extends BaseRepository {
 		}
 	}
 
-	/** Revoke every extant token in a grant family after code/refresh replay. */
+
+	/**
+	 * Mark every record of a grant family revoked.
+	 *
+	 * Revokes the code, the access tokens and the refresh state of the family at once, so that
+	 * a replay ends the whole grant. The records keep their expiry.
+	 *
+	 * @param string $family Grant family: the identifier of its authorization code.
+	 * @return void
+	 * @throws \LogicException When no transaction is open.
+	 */
 	public function revokeFamily(string $family): void {
 		$this->assertTransaction();
 		$this->admissionOnly = false;
@@ -139,7 +207,20 @@ final class OAuthStateRepository extends BaseRepository {
 		}
 	}
 
-	/** Fixed-window rate counter; call inside a transaction. */
+
+	/**
+	 * Count one attempt in a fixed window, inside the caller's transaction.
+	 *
+	 * Keeps one counter per key; its window starts with the first attempt and ends with the
+	 * counter's expiry.
+	 *
+	 * @param string $key Counter key, stored as "limit:<key>".
+	 * @param int $window Window length in seconds, from the first attempt.
+	 * @param int $limit Attempts allowed in the window.
+	 * @return bool True when this attempt is within the limit. The attempt counts either way.
+	 * @throws \LogicException When no transaction is open.
+	 * @throws OAuthCapacityException When the ledger is full for rate-limit records.
+	 */
 	public function countAttempt(string $key, int $window, int $limit): bool {
 		$record = $this->get('limit:' . $key) ?? ['expires' => \time() + $window, 'count' => 0];
 		++$record['count'];
@@ -147,10 +228,12 @@ final class OAuthStateRepository extends BaseRepository {
 		return $record['count'] <= $limit;
 	}
 
+
 	/**
-	 * Require an active transaction before mutating state.
+	 * Require an open transaction before a record changes.
 	 *
 	 * @return void
+	 * @throws \LogicException When no transaction is open.
 	 */
 	private function assertTransaction(): void {
 		if ($this->records === null) {
@@ -158,7 +241,25 @@ final class OAuthStateRepository extends BaseRepository {
 		}
 	}
 
-	/** @return resource A locked handle, never an unlinked lock inode. */
+
+	/**
+	 * Build the path of a file in the ledger directory.
+	 *
+	 * @param string $name File name.
+	 * @return string The directory without trailing separators, a slash and the name, so that a root such as / or C:\ stays a root.
+	 */
+	private function path(string $name): string {
+		return \rtrim($this->dir, '/\\') . '/' . $name;
+	}
+
+
+	/**
+	 * Open and lock the stable lock file, creating the ledger directory if needed.
+	 *
+	 * @param int $mode LOCK_SH or LOCK_EX.
+	 * @return resource The locked handle; the lock file is never unlinked.
+	 * @throws \RuntimeException When the directory cannot be created, lies inside the public directory, or cannot be locked.
+	 */
 	private function lock(int $mode) {
 		if (!\is_dir($this->dir) && !@\mkdir($this->dir, 0700, true) && !\is_dir($this->dir)) {
 			throw new \RuntimeException('Cannot create OAuth state directory.');
@@ -170,7 +271,7 @@ final class OAuthStateRepository extends BaseRepository {
 			throw new \RuntimeException('OAuth state must be outside the public directory.');
 		}
 
-		$handle = \fopen($this->dir . '/oauth.lock', 'c+b');
+		$handle = \fopen($this->path('oauth.lock'), 'c+b');
 		if ($handle === false || !\flock($handle, $mode)) {
 			throw new \RuntimeException('Cannot lock OAuth state.');
 		}
@@ -178,13 +279,16 @@ final class OAuthStateRepository extends BaseRepository {
 		return $handle;
 	}
 
+
 	/**
-	 * Read and validate the bounded ledger while its stable lock is held.
+	 * Read and validate the ledger while its lock is held.
 	 *
-	 * @return array Validated result.
+	 * @return array<string, array<string, mixed>> Records by key; empty when no ledger exists.
+	 * @throws \RuntimeException When the ledger is unreadable, larger than 4 MiB or invalid.
+	 * @throws \JsonException When the ledger is not valid JSON.
 	 */
 	private function load(): array {
-		$file = $this->dir . '/ledger.json';
+		$file = $this->path('ledger.json');
 		if (!\is_file($file)) {
 			return [];
 		}
@@ -208,10 +312,18 @@ final class OAuthStateRepository extends BaseRepository {
 		return $data['records'];
 	}
 
+
 	/**
-	 * Atomically replace the ledger while preserving admission capacity for grants.
+	 * Replace the ledger atomically.
+	 *
+	 * Behavior:
+	 * - A ledger of more than 4 MiB is refused, and one of more than 2 MiB when the transaction
+	 *   changed only approval and rate-limit records, which keeps room for grant records.
+	 * - Writes a temporary file with mode 0600 and renames it over ledger.json.
 	 *
 	 * @return void
+	 * @throws OAuthCapacityException When the ledger would exceed its size limit.
+	 * @throws \RuntimeException When the ledger cannot be written or replaced.
 	 */
 	private function save(): void {
 		$json = \json_encode(['version' => 1, 'records' => $this->records], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
@@ -219,7 +331,7 @@ final class OAuthStateRepository extends BaseRepository {
 			throw new OAuthCapacityException('OAuth ledger exceeds its size limit.');
 		}
 
-		$tmp = $this->dir . '/ledger.' . \bin2hex(\random_bytes(12)) . '.tmp';
+		$tmp = $this->path('ledger.' . \bin2hex(\random_bytes(12)) . '.tmp');
 		$handle = \fopen($tmp, 'x+b');
 		if ($handle === false) {
 			throw new \RuntimeException('Cannot create OAuth ledger temporary file.');
@@ -231,7 +343,7 @@ final class OAuthStateRepository extends BaseRepository {
 			}
 			\fclose($handle);
 			$handle = null;
-			if (!\rename($tmp, $this->dir . '/ledger.json')) {
+			if (!\rename($tmp, $this->path('ledger.json'))) {
 				throw new \RuntimeException('Cannot replace OAuth ledger.');
 			}
 		} finally {
@@ -243,4 +355,6 @@ final class OAuthStateRepository extends BaseRepository {
 			}
 		}
 	}
+
+
 }

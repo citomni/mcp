@@ -15,6 +15,12 @@ declare(strict_types=1);
 
 namespace CitOmni\Mcp\Exception;
 
-/** OAuthCapacityException: Temporary admission failure without discarding live grants. */
+/**
+ * OAuthCapacityException: Exception for a full OAuth ledger.
+ *
+ * Signals a temporary admission failure: the ledger refuses a new record rather than evict a
+ * live grant. It is meant to be answered with a retryable status, not left to the global error
+ * handler.
+ */
 final class OAuthCapacityException extends \RuntimeException {
 }

@@ -19,13 +19,14 @@ use CitOmni\Mcp\Tool\BaseTool;
 use Mcp\Server\ClientGateway;
 
 /**
- * Test tool: return the "text" argument unchanged.
+ * EchoTool: Test tool that returns its text argument unchanged.
  *
- * Its schema requires "text" and allows nothing else, so the suites can send
- * arguments the SDK must refuse before execute() runs.
+ * Its schema requires text and allows nothing else, so the suites can send arguments that the
+ * SDK must refuse before the tool runs.
  */
 final class EchoTool extends BaseTool {
 
+	/** MCP definition of the tool: one required string argument, text, read-only, no external systems. */
 	public const array DEFINITION = [
 		'description' => 'Return the given text unchanged.',
 		'inputSchema' => [
@@ -39,12 +40,15 @@ final class EchoTool extends BaseTool {
 
 
 	/**
-	 * @param array<string, mixed> $arguments ['text' => string].
+	 * Return the text argument.
+	 *
+	 * @param array{text: string} $arguments Arguments, valid against the schema.
 	 * @param ClientGateway $gateway Unused.
 	 * @return string The text.
 	 */
 	public function execute(array $arguments, ClientGateway $gateway): string {
 		return $arguments['text'];
 	}
+
 
 }

@@ -20,7 +20,12 @@ use League\OAuth2\Server\Entities\Traits\AuthCodeTrait;
 use League\OAuth2\Server\Entities\Traits\EntityTrait;
 use League\OAuth2\Server\Entities\Traits\TokenEntityTrait;
 
-/** League owns authorization-code encryption and PKCE validation. */
+/**
+ * AuthCode: League entity for an authorization code.
+ *
+ * League owns the encryption of authorization codes and their PKCE validation; the entity only
+ * carries what League sets on it.
+ */
 final class AuthCode implements AuthCodeEntityInterface {
 	use AuthCodeTrait;
 	use EntityTrait;

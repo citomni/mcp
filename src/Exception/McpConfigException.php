@@ -16,19 +16,13 @@ declare(strict_types=1);
 namespace CitOmni\Mcp\Exception;
 
 /**
- * Thrown when mcp configuration, a tool class, or the client tokens are invalid.
+ * McpConfigException: Exception for invalid mcp cfg, tool classes, OAuth secrets or a missing OAuth library.
  *
- * Behavior:
- * - Signals a problem the developer or operator must fix:
- *   1) An mcp.tools entry that is not a tool class, or a tool class whose
- *      DEFINITION the SDK rejects (the SDK exception is previous)
- *   2) mcp.auth.secret_keys naming no key that exists in the secrets store,
- *      or naming one whose value is empty
- *   3) An unknown mcp.log.sdk_level
+ * Signals a problem that the developer or operator must fix and that client input never
+ * causes, so it is left to the global error handler.
  *
- * Notes:
- * - Messages name the cfg key or the tool, so the faulty definition can be found.
- * - Never caused by client input. The controller lets it bubble to the global
- *   error handler.
+ * Rules:
+ * - Identify the cfg key, tool, secret or package to fix in the message, never a secret value.
+ * - When it wraps an SDK or library exception, keep that exception as the previous one.
  */
 final class McpConfigException extends \RuntimeException {}

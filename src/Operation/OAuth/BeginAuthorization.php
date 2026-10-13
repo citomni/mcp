@@ -20,14 +20,35 @@ use CitOmni\Mcp\Exception\OAuthCapacityException;
 use CitOmni\Mcp\Repository\OAuthRepository;
 use CitOmni\Mcp\Support\OAuth\Audit;
 
-/** BeginAuthorization: Admit a validated request and create browser-bound approval state. */
+/**
+ * BeginAuthorization: Operation that admits a validated authorization request and creates its pending approval.
+ *
+ * Owns the admission of authorization requests, so that the per-IP limit and the ledger's
+ * capacity apply to every approval page. Validating the request belongs to the adapter and
+ * League.
+ *
+ * Rules:
+ * - Store only hashes of the CSRF and browser values, never the values.
+ * - Audit every outcome.
+ */
 final class BeginAuthorization extends BaseOperation {
+
 	/**
-	 * Apply per-IP admission limits and persist a short-lived approval.
+	 * Apply the per-IP admission limit and persist a short-lived pending approval.
+	 *
+	 * Counts the request against the per-IP limit and stores the approval in one ledger
+	 * transaction, so that the limit holds across parallel PHP workers.
+	 *
+	 * Behavior:
+	 * - created, with the approval ID, the CSRF value and the browser value, when the request is
+	 *   admitted. The approval expires after mcp.oauth.approval_ttl seconds.
+	 * - rate_limited after 20 requests per IP within one minute.
+	 * - capacity when the ledger is full.
+	 * - Only the parameters needed to validate and complete the grant are stored.
 	 *
 	 * @param OAuthRepository $repository Grant repository for this request.
-	 * @param array<string, string> $params Protocol-validated authorization parameters.
-	 * @param string $ip Trusted client address.
+	 * @param array<string, string> $params Validated authorization parameters.
+	 * @param string $ip Client address resolved by the Request service.
 	 * @return array{outcome: string, id?: string, csrf?: string, browser?: string}
 	 */
 	public function execute(OAuthRepository $repository, array $params, string $ip): array {
@@ -62,4 +83,6 @@ final class BeginAuthorization extends BaseOperation {
 
 		return $result;
 	}
+
+
 }

@@ -22,24 +22,15 @@ use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 
 /**
- * Psr7Bridge: Translate between the CitOmni HTTP runtime and the PSR-7 messages of the MCP SDK.
+ * Psr7Bridge: Support class that translates between the CitOmni HTTP runtime and PSR-7.
  *
- * Behavior:
- * - readBody() reads the raw request body from php://input, at most one byte
- *   more than the limit, so the SDK can still tell that a body is too large.
- * - request() builds the PSR-7 server request from the Request service: method,
- *   full URL, headers, protocol version, and the body read before. Authorization
- *   and Cookie are left out; the SDK needs neither, and the token must not reach
- *   its logs.
- * - emit() discards every removable output buffer, sends status, headers, and
- *   body, and ends the script. A streamed (SSE) body writes and flushes itself while it
- *   is read.
+ * Gives the libraries that speak PSR-7 the request they need, built from the Request service,
+ * and sends their responses itself. It uses nyholm/psr7 directly, so that
+ * php-http/discovery never has to look for a PSR-17 implementation.
  *
- * Notes:
- * - Uses nyholm/psr7 directly, so php-http/discovery never has to look for a
- *   PSR-17 implementation.
- * - Discarding the buffers drops anything printed earlier in the request, such
- *   as a rendered notice, which would otherwise corrupt the JSON-RPC body.
+ * Rules:
+ * - Never put the Authorization or Cookie header into a request for a library.
+ * - Read the body from php://input only, bounded by the caller's limit.
  *
  * Typical usage:
  *   $bridge  = new Psr7Bridge($this->app);
@@ -51,9 +42,15 @@ final class Psr7Bridge {
 	/** Bytes per read when emitting a body. */
 	private const int CHUNK_BYTES = 8192;
 
+	/** PSR-17 factory for every message of this request. */
 	private readonly Psr17Factory $factory;
 
 
+	/**
+	 * Create the bridge for the app whose Request service describes the request.
+	 *
+	 * @param App $app App with the Request service.
+	 */
 	public function __construct(private readonly App $app) {
 		$this->factory = new Psr17Factory();
 	}
@@ -62,7 +59,7 @@ final class Psr7Bridge {
 	/**
 	 * Return the PSR-17 factory used for every message of this request.
 	 *
-	 * @return Psr17Factory Response, stream, request, and URI factory.
+	 * @return Psr17Factory Response, stream, request and URI factory.
 	 */
 	public function factory(): Psr17Factory {
 		return $this->factory;
@@ -72,7 +69,10 @@ final class Psr7Bridge {
 	/**
 	 * Read the raw request body.
 	 *
-	 * @param int $limit Largest body accepted, in bytes; one byte more is read.
+	 * Reads at most one byte more than the limit, so that a reader can still tell that a body
+	 * is too large.
+	 *
+	 * @param int $limit Largest body accepted, in bytes.
 	 * @return string The body, at most $limit + 1 bytes.
 	 * @throws \RuntimeException When php://input cannot be read.
 	 */
@@ -88,10 +88,10 @@ final class Psr7Bridge {
 
 
 	/**
-	 * Build the PSR-7 server request for the SDK.
+	 * Build the PSR-7 server request from the Request service.
 	 *
 	 * @param string $body Raw request body from readBody().
-	 * @return ServerRequestInterface The request without Authorization and Cookie headers.
+	 * @return ServerRequestInterface The request with method, full URL, headers and protocol version, without the Authorization and Cookie headers.
 	 */
 	public function request(string $body): ServerRequestInterface {
 		$request = $this->app->request;
@@ -109,6 +109,12 @@ final class Psr7Bridge {
 	/**
 	 * Send a PSR-7 response and end the script.
 	 *
+	 * Behavior:
+	 * - Discards every removable output buffer first, so that anything printed earlier in the
+	 *   request, such as a rendered notice, cannot corrupt the body.
+	 * - Sends the headers, then the status, then the body. A streamed body, such as an SSE
+	 *   stream, writes and flushes itself while it is read.
+	 *
 	 * @param ResponseInterface $response Response to send.
 	 * @return never
 	 * @throws \RuntimeException When output was already sent, so status and headers cannot be.
@@ -120,7 +126,7 @@ final class Psr7Bridge {
 
 		// Pop every removable buffer. A non-removable one (zlib.output_compression, or a
 		// buffer started without PHP_OUTPUT_HANDLER_REMOVABLE) cannot be popped: discard
-		// its content when possible and stop, as ErrorHandler::clearAllBuffers() does.
+		// its content when possible and stop.
 		while (($level = \ob_get_level()) > 0) {
 			if (@\ob_end_clean() && \ob_get_level() < $level) {
 				continue;
@@ -154,5 +160,6 @@ final class Psr7Bridge {
 
 		exit;
 	}
+
 
 }
