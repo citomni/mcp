@@ -7,7 +7,7 @@ composer install
 php tests/oauth/run.php
 ```
 
-Expected: `51 passed, 0 failed, 2 skipped`
+Expected: `52 passed, 0 failed, 2 skipped`
 
 With multi-process checks:
 
@@ -16,7 +16,7 @@ set "CITOMNI_TEST_PARALLEL=1"
 php tests/oauth/run.php
 ```
 
-Expected: `53 passed, 0 failed`
+Expected: `54 passed, 0 failed`
 
 In PowerShell, set the variable with `$env:CITOMNI_TEST_PARALLEL = '1'`; in a POSIX shell, run `CITOMNI_TEST_PARALLEL=1 php tests/oauth/run.php`. `PASS` and `SKIP` lines go to stdout and `FAIL` lines to stderr. The last line holds the totals, and the exit code is 1 when a case fails.
 
@@ -43,6 +43,7 @@ Configuration and transport:
 - With OAuth disabled every OAuth route answers 404, and fixed tokens work.
 - A fixed token works even when the OAuth configuration is broken.
 - An `enabled` value that is not a bool is a configuration error: the string `'false'` never enables OAuth, and `0` neither disables OAuth nor opens anonymous access.
+- A public key that is not a usable RSA public key is a configuration error: a well-formed access token on `/mcp` gets 500, and the logged error names the secret but holds no token. A malformed token is still refused with 401, and fixed tokens work.
 - An empty `mcp.auth.secret_keys` with OAuth enabled requires an OAuth token.
 - OAuth endpoints and OAuth bearer tokens on `/mcp` refuse cleartext and foreign hosts.
 

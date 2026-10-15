@@ -16,11 +16,13 @@ declare(strict_types=1);
 namespace CitOmni\Mcp\Policy;
 
 use CitOmni\Kernel\App;
+use CitOmni\Mcp\Exception\McpConfigException;
 use CitOmni\Mcp\Repository\OAuthRepository;
 use CitOmni\Mcp\Support\OAuth\Config;
 use CitOmni\Mcp\Support\OAuth\ServerFactory;
 use Lcobucci\JWT\Configuration;
 use Lcobucci\JWT\Exception as JwtException;
+use Lcobucci\JWT\Signer\InvalidKeyProvided;
 use Lcobucci\JWT\Signer\Key\InMemory;
 use Lcobucci\JWT\Signer\Rsa\Sha256;
 use Lcobucci\JWT\UnencryptedToken;
@@ -61,12 +63,16 @@ final class OAuthAccess {
 	 *   issued by the issuer for the resource, valid now by its iat, nbf and exp, and issued to
 	 *   the configured owner, client and scope, and whose record exists in the current
 	 *   authorization context and is not revoked.
-	 * - Returns null for anything else, including a missing or malformed header, a header longer
-	 *   than 16,384 bytes and a public key that cannot be parsed.
+	 * - Returns null for anything else, including a missing or malformed header and a header
+	 *   longer than 16,384 bytes.
+	 *
+	 * Notes:
+	 * - The public key is parsed only to verify the signature of a well-formed RS256 token, so a
+	 *   key that cannot be used surfaces with the first such token, not with a malformed header.
 	 *
 	 * @param string|null $authorization Raw Authorization header value, or null when absent.
 	 * @return string|null The identity, or null when the header holds no valid access token.
-	 * @throws \CitOmni\Mcp\Exception\McpConfigException When league/oauth2-server is missing, mcp.oauth is invalid, or the public-key secret is missing or empty.
+	 * @throws \CitOmni\Mcp\Exception\McpConfigException When league/oauth2-server is missing, mcp.oauth is invalid, the public-key secret is missing or empty, or the public key is not a usable RSA public key.
 	 */
 	public function client(#[\SensitiveParameter] ?string $authorization): ?string {
 		if ($authorization === null || \strlen($authorization) > 16384
@@ -90,9 +96,12 @@ final class OAuthAccess {
 				new IssuedBy($config->issuer), new PermittedFor($config->resource))) {
 				return null;
 			}
+		} catch (InvalidKeyProvided $e) {
+			// Only the configured key can be invalid here; a token supplies no key. The cause is not
+			// chained, because its trace may hold the token's payload and signature as arguments.
+			throw new McpConfigException('MCP OAuth secret for public_key is not a usable RSA public key: ' . $e->getMessage());
 		} catch (JwtException) {
-			// A malformed token, or a public key that cannot be parsed, fails like a bad signature:
-			// the token is rejected.
+			// A malformed token fails like a bad signature: the token is rejected.
 			return null;
 		}
 

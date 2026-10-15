@@ -47,14 +47,18 @@ if (!\class_exists(\Defuse\Crypto\Key::class)) {
 	exit(1);
 }
 
-$key = \openssl_pkey_new(['private_key_bits' => 3072, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
-if ($key === false || !\openssl_pkey_export($key, $private)) {
+// PHP for Windows ships the openssl.cnf that key generation needs, but OpenSSL does not look
+// for it there. Elsewhere OpenSSL finds its own.
+$opensslCnf = \dirname(PHP_BINARY) . '/extras/ssl/openssl.cnf';
+$opensslOptions = PHP_OS_FAMILY === 'Windows' && \is_file($opensslCnf) ? ['config' => $opensslCnf] : [];
+$key = \openssl_pkey_new(['private_key_bits' => 3072, 'private_key_type' => OPENSSL_KEYTYPE_RSA] + $opensslOptions);
+if ($key === false || !\openssl_pkey_export($key, $private, null, $opensslOptions)) {
 	$errors = [];
 	while (($error = \openssl_error_string()) !== false) {
 		$errors[] = $error;
 	}
 	throw new \RuntimeException('Cannot generate OAuth signing key: ' . \implode('; ', $errors)
-		. ' (on Windows, set OPENSSL_CONF to the openssl.cnf in the extras\\ssl directory of PHP).');
+		. ' (on Windows without extras\\ssl\\openssl.cnf next to php.exe, set OPENSSL_CONF to an openssl.cnf).');
 }
 $details = \openssl_pkey_get_details($key);
 if ($details === false) {

@@ -15,9 +15,11 @@ php vendor/citomni/mcp/bin/oauth-setup.php var/secrets/mcp.oauth.secret.php
 
 Run setup in a private terminal. It creates a new file and prints the owner approval password and the OAuth client secret once. Store both in a password manager. It refuses to overwrite a file. The file contains a password hash, the client secret, an RSA signing key pair, and a Defuse encryption key; never commit it.
 
-On Windows, PHP generates keys only when it finds an `openssl.cnf`. Set `OPENSSL_CONF` to the `extras\ssl\openssl.cnf` of the PHP installation in the terminal that runs the setup. The test suites pass that file to OpenSSL themselves.
+On Windows, PHP generates keys only when it finds an `openssl.cnf`. The setup script, like the test suites, passes the `extras\ssl\openssl.cnf` next to `php.exe` to OpenSSL, so the official PHP builds need no setup. With a PHP build that lacks the file, set `OPENSSL_CONF` to an `openssl.cnf`.
 
 Copy the five generated `mcp.oauth.*` entries directly into the existing array in the environment's secrets store, preserving their values and all existing fixed tokens and backend credentials. Keep the store self-contained and returning a flat `array<string,string>`; the generated file alone is not loaded. Do not leave a `require` of `mcp.oauth.secret.php` in it when using CitOmni DevKit deployment: DevKit transfers `app.secret.<env>.php`, not included files. Keep both files out of Git, and never regenerate active keys just to move them.
+
+A public key in the store that is not a usable RSA public key, for example one damaged while copying, is a configuration error: a request to `/mcp` with an OAuth access token gets 500 instead of 401, and the logged error names the secret. Fixed tokens keep working.
 
 Add an HTTP environment overlay:
 

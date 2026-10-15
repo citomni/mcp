@@ -109,6 +109,21 @@ test('A non-boolean enabled value that reads as false is a configuration error, 
 	unlink($log);
 });
 
+test('A public key that cannot be used is a configuration error, not a rejected token', function (): void {
+	// The client secret is no PEM key, while the private key still signs valid access tokens.
+	[$server, $dir] = oauthApp(['mcp' => ['oauth' => ['public_key_secret_key' => 'mcp.oauth.client_secret']]]);
+	$accessToken = tokens($server)['access_token'];
+	check(mcp($server, 'a.b.c')['status'] === 401, 'A malformed token is still rejected');
+	check(mcp($server, $accessToken)['status'] === 500, 'A well-formed token gets 500');
+	$log = $dir . '/var/logs/http_err_exception.jsonl';
+	$logged = is_file($log) ? (string)file_get_contents($log) : '';
+	check(str_contains($logged, 'MCP OAuth secret for public_key is not a usable RSA public key'), 'The error names the secret');
+	check(!str_contains($logged, explode('.', $accessToken)[1]), 'The error holds no token');
+	// Only the expected exception is removed; any other diagnostic stays for the last case.
+	unlink($log);
+	check(mcp($server)['status'] === 200, 'Fixed token unaffected');
+});
+
 test('OAuth bearer tokens cannot be used over cleartext or a different host', function (): void {
 	[$server] = oauthApp();
 	$tokens = tokens($server);

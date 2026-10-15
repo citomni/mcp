@@ -76,9 +76,8 @@ final class ClientAuth {
 	 *         client is the matching secret key or OAuth identity; null on failure or anonymous access.
 	 * @throws McpConfigException When mcp.auth.secret_keys is not a list of non-empty strings, names an empty
 	 *                            secret, or names no secret that exists; when mcp.oauth.enabled is read and is
-	 *                            not a bool; or, for a token that equals no secret while OAuth is enabled, when
-	 *                            league/oauth2-server is missing, mcp.oauth is invalid, or the public-key secret
-	 *                            is missing or empty.
+	 *                            not a bool; or, for a token that equals no secret while OAuth is enabled, as
+	 *                            OAuthAccess::client() documents.
 	 * @throws \InvalidArgumentException When a configured key is padded with whitespace (secrets service).
 	 * @see \CitOmni\Mcp\Policy\OAuthAccess::client()  How an OAuth access token is validated.
 	 */
