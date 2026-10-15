@@ -30,7 +30,7 @@
     },
     "require": {
         "php": "^8.5",
-        "citomni/http": "^1.0.5",
+        "citomni/http": "^1.0.5.6",
         "citomni/infrastructure": "^1.0.1.1",
         "mcp/sdk": "^0.8.1",
         "nyholm/psr7": "^1.8",
