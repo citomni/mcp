@@ -104,10 +104,8 @@ function oauthApp(array $overlay = []): array {
 	}
 
 	$cfg = \array_replace_recursive([
-		'http'   => ['base_url' => ISSUER],
-		// The HTTP error page loads its texts for locale.language; without one it logs a PHP warning.
-		'locale' => ['language' => 'en'],
-		'mcp'    => [
+		'http' => ['base_url' => ISSUER],
+		'mcp'  => [
 			'oauth' => ['enabled' => true, 'issuer' => ISSUER, 'client_id' => CLIENT, 'owner_id' => 'fixture-owner', 'scope' => 'repo.read', 'redirect_uris' => [CALLBACK]],
 			'tools' => ['client' => ClientTool::class],
 		],
