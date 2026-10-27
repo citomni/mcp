@@ -133,7 +133,7 @@ claude mcp add --transport http citomni https://www.example.com/mcp \
 
 ## Configuration
 
-The package ships this baseline in `CFG_HTTP`, shown here without the `oauth` node, which [OAuth setup](docs/oauth.md) covers. `src/Boot/Registry.php` holds the complete baseline with a comment on every key. Override any key in the app's `config/citomni_http_cfg.php` or an environment overlay. Cfg merges last-wins: maps merge key by key, lists are replaced, and an explicit empty array or null replaces what is below it.
+The package ships this baseline in `CFG_HTTP`, shown here without the `oauth` node, which [OAuth setup](docs/oauth.md) covers. `src/Boot/Registry.php` holds the complete baseline with a comment on every key. Override any key in the app's `config/citomni_http_cfg.php` or an environment overlay. Cfg merges last-wins: maps merge key by key, lists are replaced, and an explicit null replaces what is below it. An empty array replaces a list, such as `secret_keys`, and leaves a map unchanged.
 
 ```php
 'mcp' => [

@@ -62,7 +62,7 @@ require \dirname(__DIR__) . '/bootstrap.php';
  *
  * Notes:
  * - $cfg is the app's citomni_http_cfg.php. Pass only the keys to override: cfg
- *   merges last-wins, so an empty array would replace a whole baseline node.
+ *   merges last-wins, so an empty array replaces a baseline list.
  *
  * @param array<string, mixed> $cfg App cfg overlay.
  * @param array<string, string>|null $secrets Secrets for app.secret.dev.php; null writes no file.
